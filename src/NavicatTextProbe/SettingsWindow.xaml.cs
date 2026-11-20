@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media.Imaging;
 using NavicatTextProbe.Models;
+using NavicatTextProbe.Native;
 using NavicatTextProbe.Services;
 
 namespace NavicatTextProbe;
@@ -15,10 +16,15 @@ public partial class SettingsWindow : Window
     public SettingsWindow(
         AppSettings settings,
         bool hasSavedApiKey,
-        bool hasSavedVisionApiKey,
+        bool hasSavedZhipuApiKey,
         bool hasSavedDatabasePassword)
     {
         InitializeComponent();
+        SourceInitialized += (_, _) =>
+        {
+            if (!NativeMethods.ExcludeFromScreenCapture(new WindowInteropHelper(this).Handle))
+                Title = "Assistant 设置（录屏排除未生效）";
+        };
         Icon = Imaging.CreateBitmapSourceFromHIcon(
             System.Drawing.SystemIcons.Application.Handle,
             Int32Rect.Empty,
@@ -27,9 +33,9 @@ public partial class SettingsWindow : Window
         ApiKeyStatusText.Text = hasSavedApiKey
             ? "Windows 凭据管理器中已经保存了一个 API Key。"
             : "尚未保存 API Key。请先撤销聊天中暴露的旧 Key，再在这里填写新 Key。";
-        VisionApiKeyStatusText.Text = hasSavedVisionApiKey
+        ZhipuApiKeyStatusText.Text = hasSavedZhipuApiKey
             ? "Windows 凭据管理器中已经保存了智谱 API Key。"
-            : "尚未保存智谱 API Key。明文暴露过的 Key 必须先在智谱控制台吊销并重建。";
+            : "尚未保存智谱备用模型密钥。";
         DatabasePasswordStatusText.Text = hasSavedDatabasePassword
             ? "Windows 凭据管理器中已保存此连接的密码；新密码留空会保留现有密码。"
             : "尚未保存数据库密码。密码不会写入 settings.json。";
@@ -42,9 +48,9 @@ public partial class SettingsWindow : Window
 
     public bool ClearApiKey => ClearApiKeyCheckBox.IsChecked == true;
 
-    public string NewVisionApiKey => VisionApiKeyPasswordBox.Password.Trim();
+    public string NewZhipuApiKey => ZhipuApiKeyPasswordBox.Password.Trim();
 
-    public bool ClearVisionApiKey => ClearVisionApiKeyCheckBox.IsChecked == true;
+    public bool ClearZhipuApiKey => ClearZhipuApiKeyCheckBox.IsChecked == true;
 
     public string NewDatabasePassword => DatabasePasswordBox.Password;
 
@@ -56,8 +62,6 @@ public partial class SettingsWindow : Window
         ApiBaseUrlTextBox.Text = _workingCopy.ApiBaseUrl;
         ModelTextBox.Text = _workingCopy.Model;
         VisionEnabledCheckBox.IsChecked = _workingCopy.VisionEnabled;
-        VisionApiBaseUrlTextBox.Text = _workingCopy.VisionApiBaseUrl;
-        VisionModelTextBox.Text = _workingCopy.VisionModel;
         VisionCaptureScopeComboBox.SelectedValue = _workingCopy.VisionCaptureScope;
         FallbackEnabledCheckBox.IsChecked = _workingCopy.FallbackEnabled;
         FallbackApiBaseUrlTextBox.Text = _workingCopy.FallbackApiBaseUrl;
@@ -69,9 +73,10 @@ public partial class SettingsWindow : Window
         AssistantEnabledCheckBox.IsChecked = _workingCopy.AssistantEnabled;
         TaskbarEnabledCheckBox.IsChecked = _workingCopy.TaskbarPanelEnabled;
         TaskbarWidthTextBox.Text = _workingCopy.TaskbarWidth.ToString("0.##");
+        TaskbarHeightTextBox.Text = _workingCopy.TaskbarFloatingHeight.ToString("0.##");
         TaskbarFontSizeTextBox.Text = _workingCopy.TaskbarStyle.FontSize.ToString("0.##");
         TaskbarLineHeightTextBox.Text = _workingCopy.TaskbarStyle.LineHeight.ToString("0.##");
-        TaskbarOpacityTextBox.Text = _workingCopy.TaskbarStyle.BackgroundOpacity.ToString("0.##");
+        TaskbarOpacitySlider.Value = _workingCopy.TaskbarStyle.BackgroundOpacity;
         TaskbarBackgroundTextBox.Text = _workingCopy.TaskbarStyle.BackgroundColor;
         TaskbarForegroundTextBox.Text = _workingCopy.TaskbarStyle.FontColor;
 
@@ -109,15 +114,31 @@ public partial class SettingsWindow : Window
         DatabaseMaximumKilobytesTextBox.Text = (database.MaximumResultBytes / 1024).ToString();
     }
 
+    private sealed record DialogOwner(nint Handle) : System.Windows.Forms.IWin32Window;
+
+    private void ChooseBackground_OnClick(object sender, RoutedEventArgs e)
+    {
+        using var picker = new System.Windows.Forms.ColorDialog { FullOpen = true };
+        var hex = TaskbarBackgroundTextBox.Text.Trim().TrimStart('#');
+        if (hex.Length == 6 && int.TryParse(hex, System.Globalization.NumberStyles.HexNumber,
+                System.Globalization.CultureInfo.InvariantCulture, out var rgb))
+            picker.Color = System.Drawing.Color.FromArgb(255, (rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
+        if (picker.ShowDialog(new DialogOwner(new WindowInteropHelper(this).Handle)) != System.Windows.Forms.DialogResult.OK) return;
+        TaskbarBackgroundTextBox.Text = $"#{picker.Color.R:X2}{picker.Color.G:X2}{picker.Color.B:X2}";
+        if (TaskbarOpacitySlider.Value == 0) TaskbarOpacitySlider.Value = 1;
+    }
+
+    private void TransparentBackground_OnClick(object sender, RoutedEventArgs e) => TaskbarOpacitySlider.Value = 0;
+
     private void SaveButton_OnClick(object sender, RoutedEventArgs e)
     {
         if (!int.TryParse(DebounceTextBox.Text, out var debounce) ||
             !int.TryParse(MinimumIntervalTextBox.Text, out var minimumInterval) ||
             !int.TryParse(MobilePortTextBox.Text, out var port) ||
-            !double.TryParse(TaskbarWidthTextBox.Text, out var taskbarWidth) ||
+            !double.TryParse(TaskbarWidthTextBox.Text, out var taskbarWidth) || !double.IsFinite(taskbarWidth) ||
+            !double.TryParse(TaskbarHeightTextBox.Text, out var taskbarHeight) || !double.IsFinite(taskbarHeight) ||
             !double.TryParse(TaskbarFontSizeTextBox.Text, out var taskbarFontSize) ||
             !double.TryParse(TaskbarLineHeightTextBox.Text, out var taskbarLineHeight) ||
-            !double.TryParse(TaskbarOpacityTextBox.Text, out var taskbarOpacity) ||
             !double.TryParse(MobileFontSizeTextBox.Text, out var mobileFontSize) ||
             !double.TryParse(MobileLineHeightTextBox.Text, out var mobileLineHeight) ||
             !double.TryParse(MobileOpacityTextBox.Text, out var mobileOpacity))
@@ -134,8 +155,6 @@ public partial class SettingsWindow : Window
         _workingCopy.ApiBaseUrl = ApiBaseUrlTextBox.Text.Trim();
         _workingCopy.Model = ModelTextBox.Text.Trim();
         _workingCopy.VisionEnabled = VisionEnabledCheckBox.IsChecked == true;
-        _workingCopy.VisionApiBaseUrl = VisionApiBaseUrlTextBox.Text.Trim();
-        _workingCopy.VisionModel = VisionModelTextBox.Text.Trim();
         _workingCopy.VisionCaptureScope = VisionCaptureScopeComboBox.SelectedValue?.ToString() ?? "CurrentMonitor";
         _workingCopy.FallbackEnabled = FallbackEnabledCheckBox.IsChecked == true;
         _workingCopy.FallbackApiBaseUrl = FallbackApiBaseUrlTextBox.Text.Trim();
@@ -146,9 +165,10 @@ public partial class SettingsWindow : Window
         _workingCopy.AssistantEnabled = AssistantEnabledCheckBox.IsChecked == true;
         _workingCopy.TaskbarPanelEnabled = TaskbarEnabledCheckBox.IsChecked == true;
         _workingCopy.TaskbarWidth = taskbarWidth;
+        _workingCopy.TaskbarFloatingHeight = taskbarHeight;
         _workingCopy.TaskbarStyle.FontSize = taskbarFontSize;
         _workingCopy.TaskbarStyle.LineHeight = taskbarLineHeight;
-        _workingCopy.TaskbarStyle.BackgroundOpacity = taskbarOpacity;
+        _workingCopy.TaskbarStyle.BackgroundOpacity = TaskbarOpacitySlider.Value;
         _workingCopy.TaskbarStyle.BackgroundColor = TaskbarBackgroundTextBox.Text.Trim();
         _workingCopy.TaskbarStyle.FontColor = TaskbarForegroundTextBox.Text.Trim();
         _workingCopy.MobileServerEnabled = MobileEnabledCheckBox.IsChecked == true;

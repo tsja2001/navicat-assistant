@@ -140,8 +140,7 @@ internal sealed class ProbeLogger : IDisposable
         settings.ApiBaseUrl,
         settings.Model,
         settings.VisionEnabled,
-        settings.VisionApiBaseUrl,
-        settings.VisionModel,
+        visionModel = DeepSeekVisionClient.Model,
         settings.PredictionDebounceMilliseconds,
         settings.PredictionMinimumIntervalMilliseconds,
         settings.TaskbarPanelEnabled,
@@ -181,7 +180,7 @@ internal sealed class ProbeLogger : IDisposable
             capture.CaptureHash,
             elapsedMilliseconds,
             note = "截图和 Base64 仅保存在内存中，不写入日志。"
-        });
+        }, flush: true);
 
     public void WriteSuggestion(
         string trigger,
@@ -191,6 +190,7 @@ internal sealed class ProbeLogger : IDisposable
         WordExerciseRequestContext? wordContext = null)
     {
         var isExercise = result.Mode is SuggestionMode.ExerciseAnswer or SuggestionMode.ExerciseContinuation;
+        var isScreenOcr = trigger == "vision_screenshot";
         Write("suggestion", new
         {
             trigger,
@@ -198,9 +198,9 @@ internal sealed class ProbeLogger : IDisposable
             elapsedMilliseconds,
             result.Mode,
             result.Origin,
-            result.DisplayText,
-            insertText = isExercise ? null : result.InsertText,
-            explanation = isExercise ? null : result.Explanation,
+            displayText = isScreenOcr ? null : result.DisplayText,
+            insertText = isExercise || isScreenOcr ? null : result.InsertText,
+            explanation = isExercise || isScreenOcr ? null : result.Explanation,
             result.QuestionType,
             result.IsQuestion,
             result.ContextComplete,
@@ -262,7 +262,7 @@ internal sealed class ProbeLogger : IDisposable
     {
         component,
         message
-    });
+    }, flush: component == "vision_hotkey");
 
     public void WriteDatabaseContext(bool success, int rowCount, bool truncated, string message) => Write(
         "database_context",

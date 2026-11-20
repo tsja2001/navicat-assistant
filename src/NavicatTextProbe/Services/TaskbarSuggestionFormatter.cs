@@ -9,7 +9,13 @@ internal static class TaskbarSuggestionFormatter
         var displayText = string.IsNullOrWhiteSpace(suggestion.DisplayText)
             ? "当前没有可靠建议"
             : suggestion.DisplayText.Trim();
+        var body = suggestion.FullSuggestionText;
+        if (suggestion.IsScreenResult && !string.IsNullOrWhiteSpace(body))
+            return body;
+
         var expandedText = BuildExpandedExerciseText(suggestion, displayText);
+        if (!string.IsNullOrWhiteSpace(body) && !expandedText.Contains(body, StringComparison.Ordinal))
+            expandedText += Environment.NewLine + body;
         return suggestion.HasCandidates
             ? $"{suggestion.ActiveCandidateIndex + 1}/{suggestion.Candidates.Count}  {expandedText}"
             : expandedText;
@@ -17,6 +23,12 @@ internal static class TaskbarSuggestionFormatter
 
     private static string BuildExpandedExerciseText(SuggestionResult suggestion, string displayText)
     {
+        if (suggestion.Origin == "clipboard_screen_ocr" ||
+            (suggestion.Origin == "vision_screenshot" && string.IsNullOrWhiteSpace(suggestion.QuestionNumber)))
+        {
+            return displayText;
+        }
+
         if (suggestion.Mode is not SuggestionMode.ExerciseAnswer and not SuggestionMode.ExerciseContinuation ||
             !suggestion.IsQuestion ||
             !suggestion.SameAsCurrentQuestion)

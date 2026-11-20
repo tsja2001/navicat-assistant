@@ -10,6 +10,11 @@ internal static class NativeMethods
     internal const long WsExAppWindow = 0x00040000L;
     internal const long WsExNoActivate = 0x08000000L;
     internal const int WmMouseActivate = 0x0021;
+    internal const int WmMouseMove = 0x0200;
+    internal const int WmLeftButtonDown = 0x0201;
+    internal const int WmLeftButtonUp = 0x0202;
+    internal const int WmCaptureChanged = 0x0215;
+    internal const uint SemNoGpFaultErrorBox = 0x0002;
     internal const uint WmGetText = 0x000D;
     internal const uint WmGetTextLength = 0x000E;
     internal const int MaNoActivate = 3;
@@ -32,11 +37,69 @@ internal static class NativeMethods
     internal const uint GuiCaretBlinking = 0x00000001;
     internal const uint GcsCompStr = 0x0008;
     internal const int DwmwaExtendedFrameBounds = 9;
+    internal const uint WdaExcludeFromCapture = 0x11;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetWindowDisplayAffinity(nint windowHandle, uint affinity);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetWindowDisplayAffinity(nint windowHandle, out uint affinity);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DwmBlurBehind
+    {
+        public uint Flags;
+        public int Enable;
+        public nint BlurRegion;
+        public int TransitionOnMaximized;
+    }
+
+    [DllImport("dwmapi.dll", ExactSpelling = true)]
+    private static extern int DwmEnableBlurBehindWindow(nint hwnd, in DwmBlurBehind blur);
+
+    [DllImport("gdi32.dll", ExactSpelling = true)]
+    private static extern nint CreateRectRgn(int left, int top, int right, int bottom);
+
+    [DllImport("gdi32.dll", ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DeleteObject(nint gdiObject);
+
+    internal static bool EnableClientTransparency(nint hwnd)
+    {
+        // A tiny region outside the client enables DWM alpha composition on the rest of the
+        // surface. Keep the ordinary redirected HWND used for Windows capture exclusion.
+        var region = CreateRectRgn(-1, -1, 0, 0);
+        if (region == 0) return false;
+        try
+        {
+            var blur = new DwmBlurBehind { Flags = 3, Enable = 1, BlurRegion = region };
+            return DwmEnableBlurBehindWindow(hwnd, in blur) == 0;
+        }
+        finally { DeleteObject(region); }
+    }
+
+    internal static bool ExcludeFromScreenCapture(nint windowHandle) =>
+        OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041) &&
+        SetWindowDisplayAffinity(windowHandle, WdaExcludeFromCapture) &&
+        GetWindowDisplayAffinity(windowHandle, out var affinity) &&
+        affinity == WdaExcludeFromCapture;
 
     internal delegate nint LowLevelKeyboardProc(int code, nint wParam, nint lParam);
 
     [DllImport("user32.dll")]
     internal static extern nint GetForegroundWindow();
+
+    [DllImport("kernel32.dll")]
+    internal static extern uint SetErrorMode(uint mode);
+
+    [DllImport("user32.dll")]
+    internal static extern nint SetCapture(nint hwnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool ReleaseCapture();
 
     [DllImport("user32.dll")]
     internal static extern nint GetAncestor(nint windowHandle, uint flags);
@@ -83,7 +146,7 @@ internal static class NativeMethods
         uint flags);
 
     [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern nint SendMessageTimeout(
+    internal static extern nint SendMessageTimeout(
         nint windowHandle,
         uint message,
         nuint wParam,

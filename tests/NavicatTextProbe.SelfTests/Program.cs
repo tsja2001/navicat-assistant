@@ -11,6 +11,9 @@ using NavicatTextProbe.Native;
 using NavicatTextProbe.Models;
 using NavicatTextProbe.Services;
 
+if (args.Contains("--verify-screen-capture"))
+    return ScreenCaptureVerification.Run(args.Contains("--verify-notepad-capture"));
+
 var failures = new List<string>();
 
 void Check(string name, bool condition)
@@ -749,6 +752,13 @@ var visionCapture = new VisionCaptureSnapshot
     CaptureHash = "vision-self-test"
 };
 var visionPrompt = VisionExercisePromptTemplates.BuildUserPrompt(visionCapture);
+var multilineAnswer = "class Solution:\n    def solve(self, nums):\n        return sorted(nums)\n" + new string('#', 150);
+foreach (var origin in new[] { "vision_screenshot", "clipboard_screen_ocr" })
+{
+    var sample = new SuggestionResult { Origin = origin, DisplayText = "先排序", FullAnswer = multilineAnswer, InsertText = "sorted(nums)" };
+    Check("the floating strip preserves the full answer and indentation for " + origin,
+        TaskbarSuggestionFormatter.BuildText(sample) == sample.FullSuggestionText && sample.FullSuggestionText == multilineAnswer);
+}
 Check("vision prompt identifies the clean and annotated images plus exact marker coordinates",
     VisionExercisePromptTemplates.DefaultSystemPrompt.Contains("红色空心圆", StringComparison.Ordinal) &&
     visionPrompt.Contains("红圈中心像素：(400, 300)", StringComparison.Ordinal) &&
@@ -793,22 +803,18 @@ var visionEnvelope = JsonSerializer.Serialize(new
 });
 var visionHandler = new RecordingHttpMessageHandler(visionEnvelope);
 SuggestionResult visionApiResult;
-using (var visionClient = new ZhipuVisionClient(visionHandler))
+using (var visionClient = new DeepSeekVisionClient(visionHandler))
 {
     visionApiResult = await visionClient.AnswerExerciseAsync(
-        new AppSettings
-        {
-            VisionApiBaseUrl = "https://vision-self-test.invalid/api/paas/v4",
-            VisionModel = "glm-4.6v"
-        },
+        new AppSettings(),
         "vision-self-test-key",
         visionCapture,
         CancellationToken.None);
 }
-Check("GLM vision request sends two images and maps function arguments",
+Check("DeepSeek vision request sends two images and maps function arguments",
     visionHandler.AuthorizationScheme == "Bearer" &&
     visionHandler.RequestBody.Split("\"type\":\"image_url\"", StringSplitOptions.None).Length == 3 &&
-    visionHandler.RequestBody.Contains("glm-4.6v", StringComparison.Ordinal) &&
+    visionHandler.RequestBody.Contains("deepseek-flash", StringComparison.Ordinal) &&
     visionApiResult.Origin == "vision_screenshot" &&
     visionApiResult.Mode == SuggestionMode.ExerciseAnswer &&
     visionApiResult.QuestionNumber == "6" &&
@@ -817,6 +823,45 @@ Check("GLM vision request sends two images and maps function arguments",
     visionApiResult.InsertText.StartsWith('，') &&
     visionApiResult.PromptTokens == 456 &&
     visionApiResult.CompletionTokens == 78);
+
+using (var visionClient = new DeepSeekVisionClient())
+{
+    var generalQuestion = JsonSerializer.Serialize(new
+    {
+        is_question = true,
+        question_type = "short_answer",
+        question_text = "一年有几个月？",
+        answer_state = "partial",
+        display_text = "个月。",
+        insert_text = "个月。",
+        full_answer = "一年有 12 个月。",
+        confidence = 0.95
+    });
+    var answerWithoutCaret = visionClient.ParsePayload(generalQuestion, hasReliableCaret: false);
+    Check("screen OCR shows a general answer without offering a continuation when the caret is unknown",
+        answerWithoutCaret.QuestionText == "一年有几个月？" &&
+        answerWithoutCaret.AnswerState == "uncertain" &&
+        answerWithoutCaret.InsertText.Length == 0 &&
+        answerWithoutCaret.DisplayText == "一年有 12 个月。" &&
+        TaskbarSuggestionFormatter.BuildText(answerWithoutCaret) == answerWithoutCaret.DisplayText &&
+        ClipboardAnswerService.Select(answerWithoutCaret, sqlAnswer: false)?.Text == "一年有 12 个月。");
+
+    var transcription = visionClient.ParsePayload("""
+        {"is_question":false,"question_text":"图书馆周一开放。","insert_text":"无效续写","confidence":0.95}
+        """, hasReliableCaret: true);
+    Check("screen OCR displays transcribed text without supplying an answer for plain text",
+        transcription.Mode == SuggestionMode.Information &&
+        transcription.QuestionText == "图书馆周一开放。" &&
+        transcription.DisplayText == transcription.QuestionText &&
+        ClipboardAnswerService.Select(transcription, sqlAnswer: false) is null);
+    var ambiguous = visionClient.ParsePayload("""
+        {"is_question":true,"target_ambiguous":true,"question_text":"两道独立题目","answer_state":"partial","insert_text":"A","full_answer":"A","confidence":0.99}
+        """, hasReliableCaret: true);
+    Check("an ambiguous OCR target prompts for a new screenshot and supplies no answer",
+        ambiguous.Mode == SuggestionMode.Information && ambiguous.DisplayText.Contains("多道题") &&
+        ambiguous.InsertText.Length == 0 && ambiguous.FullAnswer.Length == 0 &&
+        ClipboardAnswerService.Select(ambiguous, sqlAnswer: false) is null);
+}
 
 var deepSeekListener = new TcpListener(IPAddress.Loopback, 0);
 deepSeekListener.Start();
@@ -1236,6 +1281,8 @@ Directory.CreateDirectory(Path.Combine(settingsTestRoot, "config"));
 File.WriteAllText(Path.Combine(settingsTestRoot, "config", "settings.json"), """
     {
       "SettingsVersion": 2,
+      "VisionApiBaseUrl": "https://old-provider.invalid",
+      "VisionModel": "glm-4.6v",
       "OverlayEnabled": true,
       "TaskbarPanelEnabled": false,
       "TaskbarWidth": 9999,
@@ -1249,7 +1296,8 @@ try
     Check("taskbar width is clamped to the supported range", migratedSettings.Current.TaskbarWidth == 1400);
     Check("global assistant hotkey defaults to Ctrl+Alt+S", migratedSettings.Current.ToggleAssistantHotkey == "Ctrl+Alt+S");
     Check("core hotkeys and database settings migrate to the unified defaults",
-        migratedSettings.Current.SettingsVersion == 10 &&
+        migratedSettings.Current.SettingsVersion == 12 &&
+        migratedSettings.Current.TaskbarFloatingHeight == 160 &&
         migratedSettings.Current.WordExerciseHotkey == "Ctrl+Alt+A" &&
         migratedSettings.Current.SmartActionHotkey == "Ctrl+Alt+A" &&
         migratedSettings.Current.CopyFullAnswerHotkey == "Ctrl+Alt+C" &&
@@ -1259,12 +1307,13 @@ try
         migratedSettings.Current.ToggleMobileHotkey == "Ctrl+Alt+M" &&
         migratedSettings.Current.ToggleMobilePrivacyHotkey == "Ctrl+Alt+P" &&
         migratedSettings.Current.DatabaseConnection.ProfileId == "default" &&
-        migratedSettings.Current.VisionModel == "glm-4.6v" &&
         migratedSettings.Current.FallbackEnabled &&
         migratedSettings.Current.FallbackModel == "glm-5.2" &&
         migratedSettings.Current.FallbackApiBaseUrl == "https://open.bigmodel.cn/api/paas/v4");
     Check("settings never serialize a database password",
         !File.ReadAllText(migratedSettings.SettingsPath).Contains("DatabasePassword", StringComparison.OrdinalIgnoreCase));
+    Check("legacy OCR provider is dropped on migration",
+        !File.ReadAllText(migratedSettings.SettingsPath).Contains("old-provider.invalid", StringComparison.Ordinal));
     Check("removed overlay settings are not written back",
         !File.ReadAllText(migratedSettings.SettingsPath).Contains("OverlayEnabled", StringComparison.Ordinal));
 }
@@ -1274,6 +1323,7 @@ finally
 }
 
 long taskbarExtendedStyle = 0;
+uint taskbarCaptureAffinity = 0;
 var taskbarPageCount = 1;
 var taskbarAdvancedToSecondPage = false;
 Exception? taskbarStyleError = null;
@@ -1290,8 +1340,8 @@ var taskbarStyleThread = new Thread(() =>
             SuggestionResult.Info(new string('长', 400)),
             new DisplayStyle { FontSize = 11, LineHeight = 15 },
             240);
-        taskbarWindow.Opacity = 0;
         taskbarWindow.Show();
+        NativeMethods.GetWindowDisplayAffinity(handle, out taskbarCaptureAffinity);
         taskbarWindow.UpdateLayout();
         taskbarAdvancedToSecondPage = taskbarWindow.ChangePage(1);
         taskbarPageCount = taskbarWindow.PageCount;
@@ -1306,6 +1356,8 @@ taskbarStyleThread.SetApartmentState(ApartmentState.STA);
 taskbarStyleThread.Start();
 taskbarStyleThread.Join();
 Check("taskbar tool-window style can be created without showing UI", taskbarStyleError is null);
+Check("visible taskbar answer uses Windows capture exclusion",
+    taskbarCaptureAffinity == NativeMethods.WdaExcludeFromCapture);
 Check("taskbar suggestion is excluded from app switching",
     (taskbarExtendedStyle & NativeMethods.WsExToolWindow) != 0 &&
     (taskbarExtendedStyle & NativeMethods.WsExNoActivate) != 0 &&
@@ -1330,9 +1382,17 @@ var exclusiveHookThread = new Thread(() =>
         using var service = new GlobalHotkeyService();
         var errors = service.Register(handle, new Dictionary<HotkeyAction, string>
         {
-            [HotkeyAction.ToggleAssistant] = "Ctrl+Alt+S"
+            [HotkeyAction.ToggleGuidedTyping] = "Ctrl+Shift+F21",
+            [HotkeyAction.CaptureVisionExercise] = "Ctrl+Shift+F22"
         });
-        exclusiveHookInstalled = service.UsesExclusiveInterception && errors.Count == 0;
+        // A second registration for the OCR combination must fail until disposal.
+        bool TryReserveOcr() => NativeMethods.RegisterHotKey(handle, 7982, 0x0006, 0x85);
+        var reservedWhileRunning = !TryReserveOcr();
+        NativeMethods.UnregisterHotKey(handle, 7982);
+        exclusiveHookInstalled = service.UsesExclusiveInterception && errors.Count == 0 && reservedWhileRunning;
+        service.Dispose();
+        exclusiveHookInstalled &= TryReserveOcr();
+        NativeMethods.UnregisterHotKey(handle, 7982);
         window.Close();
     }
     catch (Exception ex)

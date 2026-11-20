@@ -161,15 +161,22 @@ internal sealed class GlobalHotkeyService : IDisposable
             return errors;
         }
 
-        _matcher = new ExclusiveHotkeyMatcher(parsedShortcuts);
-        if (TryStartExclusiveHook(out var hookError))
+        // Windows owns the two controls needed while working in other apps.
+        // Only the remaining shortcuts should be consumed by the exclusive hook.
+        var systemShortcuts = parsedShortcuts.FindAll(shortcut =>
+            shortcut.Action is HotkeyAction.CaptureVisionExercise or HotkeyAction.ToggleAssistant);
+        var exclusiveShortcuts = parsedShortcuts.Except(systemShortcuts).ToList();
+        if (exclusiveShortcuts.Count > 0)
         {
-            return errors;
+            _matcher = new ExclusiveHotkeyMatcher(exclusiveShortcuts);
+            if (!TryStartExclusiveHook(out var hookError))
+            {
+                _matcher = null;
+                errors.Add($"独占快捷键拦截不可用（{hookError}），已降级为普通系统热键。");
+                systemShortcuts.AddRange(exclusiveShortcuts);
+            }
         }
-
-        _matcher = null;
-        errors.Add($"独占快捷键拦截不可用（{hookError}），已降级为普通系统热键。");
-        RegisterFallback(windowHandle, parsedShortcuts, errors);
+        RegisterSystemHotkeys(windowHandle, systemShortcuts, errors);
         return errors;
     }
 
@@ -277,7 +284,7 @@ internal sealed class GlobalHotkeyService : IDisposable
         return parsed;
     }
 
-    private void RegisterFallback(
+    private void RegisterSystemHotkeys(
         nint windowHandle,
         IReadOnlyList<ParsedHotkey> shortcuts,
         List<string> errors)
@@ -293,7 +300,7 @@ internal sealed class GlobalHotkeyService : IDisposable
                     (uint)shortcut.Modifiers | ModNoRepeat,
                     shortcut.VirtualKey))
             {
-                errors.Add($"快捷键已被其他程序占用：{shortcut.DisplayText}");
+                errors.Add($"无法注册 {shortcut.DisplayText}（Win32 {Marshal.GetLastWin32Error()}）。请检查是否已启动另一份 Assistant，或在设置中更换组合键。");
                 continue;
             }
 

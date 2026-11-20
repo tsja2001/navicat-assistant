@@ -14,20 +14,33 @@
         </Grid.RowDefinitions>
 
         <Grid>
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
             <StackPanel>
                 <TextBlock FontSize="25" FontWeight="SemiBold" Foreground="#17202A" Text="Assistant" />
                 <TextBlock Margin="0,5,0,0" Foreground="#5D6D7E"
-                           Text="读取 Navicat/Word/剪贴板题目；Ctrl+Alt+C/V 分别复制当前题答案和回答剪贴板题目。" />
+                           x:Name="ScreenShortcutText" Text="屏幕识别" />
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
                 <Button MinWidth="106" Height="34" Padding="14,0" Click="AnalyzeButton_OnClick" Content="分析剪贴板" />
                 <Button Margin="9,0,0,0" MinWidth="88" Height="34" Padding="14,0" Click="SettingsButton_OnClick" Content="设置" />
                 <Button x:Name="ToggleButton" Margin="9,0,0,0" MinWidth="96" Height="34" Padding="14,0"
-                        Click="ToggleButton_OnClick" Content="隐藏 Assistant" />
+                        Click="ToggleButton_OnClick" Content="暂停全部功能" />
                 <Button Margin="9,0,0,0" MinWidth="96" Height="34" Padding="14,0"
                         Click="OpenLogsButton_OnClick" Content="日志目录" />
             </StackPanel>
+            <WrapPanel Grid.Row="1" Grid.ColumnSpan="2" Margin="0,10,0,0" VerticalAlignment="Center">
+                <Label Target="{Binding ElementName=ScreenOcrKeyBox}" Content="DeepSeek OCR 密钥" VerticalAlignment="Center"/>
+                <PasswordBox x:Name="ScreenOcrKeyBox" Width="210" Height="30" Padding="6,3"
+                             AutomationProperties.Name="DeepSeek OCR API Key"/>
+                <CheckBox x:Name="RememberScreenOcrKeyBox" Margin="12,0" VerticalAlignment="Center"
+                          Content="记住密钥" ToolTip="勾选后点应用，将密钥保存到 Windows 凭据管理器。取消勾选后点应用，下次启动需重新输入。"/>
+                <Button Content="应用" Padding="14,3" Click="ApplyScreenOcrKey_OnClick"/>
+                <Button x:Name="DeleteScreenOcrKeyButton" Margin="8,0,0,0" Padding="10,3" Content="删除 OCR 密钥"
+                        IsEnabled="False" Click="DeleteScreenOcrKey_OnClick"
+                        ToolTip="删除这台电脑保存的 OCR 密钥，并清空本次使用的密钥。"/>
+                <TextBlock x:Name="ScreenOcrKeyStatus" Margin="10,0,0,0" VerticalAlignment="Center" Foreground="#52616F"/>
+            </WrapPanel>
         </Grid>
 
         <Border Grid.Row="1" Margin="0,15,0,0" Padding="12,10" CornerRadius="8"
@@ -66,6 +79,7 @@
                     <TextBlock FontWeight="SemiBold" Foreground="#273746" Text="输出通道" />
                     <TextBlock x:Name="AssistantStatusText" Margin="0,8,0,0" Foreground="#52616F" Text="Assistant：—" />
                     <TextBlock x:Name="TaskbarStatusText" Margin="0,5,0,0" Foreground="#52616F" Text="任务栏内建议：—" />
+                    <TextBlock x:Name="CapturePrivacyText" Margin="0,5,0,0" Foreground="#52616F" TextWrapping="Wrap" />
                     <TextBlock x:Name="MobileStatusText" Margin="0,5,0,0" Foreground="#52616F" TextWrapping="Wrap" Text="手机页面：—" />
                     <WrapPanel Margin="0,8,0,0">
                         <Button Height="27" Padding="8,0" Margin="0,0,6,5" Click="OpenLocalMobilePageButton_OnClick" Content="电脑打开" />
@@ -99,13 +113,18 @@
             <TabItem Header="完整 AI 建议">
                 <Grid Margin="12">
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <TextBlock FontWeight="SemiBold" Foreground="#273746" Text="可插入/替换的 SQL" />
+                    <TextBlock x:Name="SuggestionInsertLabel" FontWeight="SemiBold" Foreground="#273746" Text="可插入/替换的 SQL" />
                     <TextBox x:Name="SuggestionInsertTextBox" Grid.Row="1" Margin="0,8,0,10" Padding="12" IsReadOnly="True"
                              IsUndoEnabled="False"
                              AcceptsReturn="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
                              FontFamily="Cascadia Mono, Consolas" FontSize="14" Background="#18212B" Foreground="#EAECEE" BorderThickness="0" Text="—" />
                     <TextBlock x:Name="IssuesText" Grid.Row="2" Foreground="#7B241C" TextWrapping="Wrap" />
                 </Grid>
+            </TabItem>
+            <TabItem x:Name="ScreenOcrTab" Header="屏幕识别原文" Visibility="Collapsed">
+                <TextBox x:Name="ScreenOcrTextBox" Margin="12" Padding="12" IsReadOnly="True"
+                         IsUndoEnabled="False" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                         FontSize="14" Background="#18212B" Foreground="#EAECEE" BorderThickness="0" />
             </TabItem>
         </TabControl>
 

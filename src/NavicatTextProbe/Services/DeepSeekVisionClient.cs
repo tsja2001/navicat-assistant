@@ -7,15 +7,18 @@ using NavicatTextProbe.Models;
 
 namespace NavicatTextProbe.Services;
 
-internal sealed class ZhipuVisionClient : IDisposable
+internal sealed class DeepSeekVisionClient : IDisposable
 {
+    internal const string Model = "deepseek-flash";
+    internal const string Endpoint = "https://api.deepseek.com/chat/completions";
+    private const double MinimumAnswerConfidence = 0.45;
     private readonly HttpClient _httpClient;
     private readonly JsonSerializerOptions _jsonOptions = new()
     {
         PropertyNameCaseInsensitive = true
     };
 
-    public ZhipuVisionClient(HttpMessageHandler? handler = null)
+    public DeepSeekVisionClient(HttpMessageHandler? handler = null)
     {
         _httpClient = handler is null ? new HttpClient() : new HttpClient(handler);
         _httpClient.Timeout = TimeSpan.FromSeconds(60);
@@ -29,19 +32,18 @@ internal sealed class ZhipuVisionClient : IDisposable
     {
         if (string.IsNullOrWhiteSpace(apiKey))
         {
-            return SuggestionResult.Error("尚未配置智谱 API Key");
+            return SuggestionResult.Error("请在主窗口输入 DeepSeek OCR 密钥并点击应用");
         }
         if (!capture.IsCaptured)
         {
             return SuggestionResult.Error(capture.Message);
         }
 
-        var endpoint = settings.VisionApiBaseUrl.TrimEnd('/') + "/chat/completions";
-        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
+        using var request = new HttpRequestMessage(HttpMethod.Post, Endpoint);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey.Trim());
         request.Content = JsonContent.Create(new
         {
-            model = settings.VisionModel,
+            model = Model,
             messages = new object[]
             {
                 new
@@ -65,11 +67,10 @@ internal sealed class ZhipuVisionClient : IDisposable
                 }
             },
             thinking = new { type = "disabled" },
-            do_sample = false,
             max_tokens = 1800,
             stream = false,
             tools = new[] { BuildAnswerTool() },
-            tool_choice = "auto"
+            tool_choice = new { type = "function", function = new { name = "return_exercise_answer" } }
         });
 
         try
@@ -79,7 +80,7 @@ internal sealed class ZhipuVisionClient : IDisposable
             if (!response.IsSuccessStatusCode)
             {
                 return SuggestionResult.Error(
-                    $"智谱视觉请求失败：{(int)response.StatusCode}",
+                    $"DeepSeek 截图识别失败（HTTP {(int)response.StatusCode}）",
                     CompactError(responseBody));
             }
 
@@ -90,13 +91,13 @@ internal sealed class ZhipuVisionClient : IDisposable
             var payloadJson = ReadToolArguments(message) ?? ReadContent(message);
             if (string.IsNullOrWhiteSpace(payloadJson))
             {
-                return SuggestionResult.Error("智谱视觉模型没有返回可解析的题目结果");
+                return SuggestionResult.Error("DeepSeek 没有返回可解析的截图结果");
             }
 
             var usage = envelope.RootElement.TryGetProperty("usage", out var usageElement)
                 ? usageElement
                 : default;
-            return ParsePayload(payloadJson, usage);
+            return ParsePayload(payloadJson, capture.HasReliableCaret, usage);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -104,11 +105,11 @@ internal sealed class ZhipuVisionClient : IDisposable
         }
         catch (Exception ex)
         {
-            return SuggestionResult.Error("连接智谱视觉模型失败", ex.Message);
+            return SuggestionResult.Error("连接 DeepSeek 视觉模型失败", ex.Message);
         }
     }
 
-    internal SuggestionResult ParsePayload(string payloadJson, JsonElement usage = default)
+    internal SuggestionResult ParsePayload(string payloadJson, bool hasReliableCaret, JsonElement usage = default)
     {
         try
         {
@@ -117,51 +118,63 @@ internal sealed class ZhipuVisionClient : IDisposable
                 _jsonOptions);
             if (payload is null)
             {
-                return SuggestionResult.Error("无法解析智谱视觉模型返回的 JSON");
+                return SuggestionResult.Error("无法解析 DeepSeek 返回的 JSON");
             }
 
-            if (!payload.IsQuestion)
-            {
-                return new SuggestionResult
+            var recognizedText = payload.QuestionText?.Trim() ?? string.Empty;
+            var answerState = hasReliableCaret ? NormalizeAnswerState(payload.AnswerState) : "uncertain";
+            var confidence = Math.Clamp(payload.Confidence, 0, 1);
+            var fullAnswer = payload.FullAnswer?.Trim() ?? string.Empty;
+            var insertText = answerState is "empty" or "partial"
+                ? payload.InsertText?.TrimEnd() ?? string.Empty
+                : string.Empty;
+            var hasAnswer = !payload.TargetAmbiguous && payload.IsQuestion && confidence >= MinimumAnswerConfidence &&
+                            (fullAnswer.Length > 0 || insertText.Length > 0 || answerState == "complete");
+            var display = hasAnswer
+                ? CompactDisplay(answerState switch
                 {
-                    Mode = SuggestionMode.Information,
-                    Origin = "vision_screenshot",
-                    DisplayText = "光标附近不像 SQL 数据库练习题",
-                    IsQuestion = false,
-                    ContextComplete = false,
-                    Confidence = Math.Clamp(payload.Confidence, 0, 1),
-                    Explanation = payload.Explanation?.Trim() ?? string.Empty,
-                    PromptTokens = ReadUsageInt(usage, "prompt_tokens"),
-                    CompletionTokens = ReadUsageInt(usage, "completion_tokens")
-                };
+                    "uncertain" => fullAnswer,
+                    "partial" when !string.IsNullOrWhiteSpace(insertText) => insertText,
+                    _ => payload.DisplayText
+                })
+                : CompactDisplay(recognizedText);
+            if (payload.TargetAmbiguous)
+            {
+                display = "看到多道题，请点进目标题目，或只留一道完整题目再截图。";
+            }
+            else if (display.Length == 0)
+            {
+                display = hasAnswer
+                    ? fullAnswer.Length > 0 ? CompactDisplay(fullAnswer) : "当前文字已写完整"
+                    : "没有识别到清楚的文字，请放大后重试";
             }
 
-            var questionType = NormalizeQuestionType(payload.QuestionType);
-            var answerState = NormalizeAnswerState(payload.AnswerState);
             return new SuggestionResult
             {
-                Mode = SuggestionMode.ExerciseAnswer,
+                Mode = hasAnswer ? SuggestionMode.ExerciseAnswer : SuggestionMode.Information,
                 Origin = "vision_screenshot",
-                IsQuestion = true,
-                ContextComplete = answerState != "uncertain",
-                QuestionType = questionType,
-                QuestionNumber = WordExerciseContextBuilder.NormalizeQuestionNumber(payload.QuestionNumber),
+                IsQuestion = hasAnswer,
+                ContextComplete = hasAnswer && answerState != "uncertain",
+                QuestionType = NormalizeQuestionType(payload.QuestionType),
+                QuestionNumber = string.IsNullOrWhiteSpace(payload.QuestionNumber)
+                    ? string.Empty
+                    : WordExerciseContextBuilder.NormalizeQuestionNumber(payload.QuestionNumber),
                 ActiveSubquestionNumber = WordExerciseContextBuilder.NormalizeSubquestionNumber(payload.ActiveSubquestionNumber),
-                QuestionText = payload.QuestionText?.Trim() ?? string.Empty,
+                QuestionText = recognizedText,
                 AnswerState = answerState,
-                DetectedUserAnswer = payload.DetectedUserAnswerBeforeCursor?.Trim() ?? string.Empty,
-                DisplayText = CompactDisplay(payload.DisplayText),
-                InsertText = payload.InsertText?.TrimEnd() ?? string.Empty,
-                FullAnswer = payload.FullAnswer?.Trim() ?? string.Empty,
-                Explanation = payload.Explanation?.Trim() ?? string.Empty,
-                Confidence = Math.Clamp(payload.Confidence, 0, 1),
+                DetectedUserAnswer = answerState == "uncertain" ? string.Empty : payload.DetectedUserAnswerBeforeCursor?.Trim() ?? string.Empty,
+                DisplayText = display,
+                InsertText = hasAnswer ? insertText : string.Empty,
+                FullAnswer = hasAnswer ? fullAnswer : string.Empty,
+                Explanation = hasAnswer ? payload.Explanation?.Trim() ?? string.Empty : string.Empty,
+                Confidence = confidence,
                 PromptTokens = ReadUsageInt(usage, "prompt_tokens"),
                 CompletionTokens = ReadUsageInt(usage, "completion_tokens")
             };
         }
         catch (Exception ex)
         {
-            return SuggestionResult.Error("无法解析智谱视觉模型返回的 JSON", ex.Message);
+            return SuggestionResult.Error("无法解析 DeepSeek 返回的 JSON", ex.Message);
         }
     }
 
@@ -180,13 +193,14 @@ internal sealed class ZhipuVisionClient : IDisposable
         function = new
         {
             name = "return_exercise_answer",
-            description = "返回红圈光标所在数据库练习题、作答状态和答案。",
+            description = "返回截图原文以及可用的答案或续写。",
             parameters = new
             {
                 type = "object",
                 properties = new Dictionary<string, object>
                 {
                     ["is_question"] = new { type = "boolean" },
+                    ["target_ambiguous"] = new { type = "boolean" },
                     ["question_type"] = new { type = "string", @enum = new[] { "choice", "fill_blank", "short_answer", "unknown" } },
                     ["question_number"] = new { type = "string" },
                     ["active_subquestion_number"] = new { type = "string" },
@@ -202,6 +216,7 @@ internal sealed class ZhipuVisionClient : IDisposable
                 required = new[]
                 {
                     "is_question",
+                    "target_ambiguous",
                     "question_type",
                     "question_number",
                     "active_subquestion_number",
@@ -320,6 +335,9 @@ internal sealed class ZhipuVisionClient : IDisposable
     {
         [JsonPropertyName("is_question")]
         public bool IsQuestion { get; init; }
+
+        [JsonPropertyName("target_ambiguous")]
+        public bool TargetAmbiguous { get; init; }
 
         [JsonPropertyName("question_type")]
         public string? QuestionType { get; init; }

@@ -7,6 +7,7 @@ namespace NavicatTextProbe.Services;
 internal static class WindowsCredentialService
 {
     private const string DeepSeekTargetName = "NavicatSqlCopilot/DeepSeekApiKey";
+    private const string ScreenOcrTargetName = "Assistant/DeepSeekScreenOcrApiKey";
     private const string ZhipuTargetName = "Assistant/ZhipuApiKey";
     private const string DatabaseTargetPrefix = "Assistant/MySql/";
     private const uint CredentialTypeGeneric = 1;
@@ -18,6 +19,10 @@ internal static class WindowsCredentialService
     public static string? ReadApiKey() => Read(DeepSeekTargetName);
 
     public static void DeleteApiKey() => Delete(DeepSeekTargetName);
+
+    public static void SaveScreenOcrKey(string apiKey) => Save(ScreenOcrTargetName, "DeepSeek OCR", apiKey);
+    public static string? ReadScreenOcrKey() => Read(ScreenOcrTargetName);
+    public static void DeleteScreenOcrKey() => Delete(ScreenOcrTargetName);
 
     public static void SaveZhipuApiKey(string apiKey) =>
         Save(ZhipuTargetName, "智谱 GLM API", apiKey);

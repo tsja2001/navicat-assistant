@@ -115,8 +115,6 @@ internal sealed class SettingsService
         if (settings.SettingsVersion < 5)
         {
             settings.VisionEnabled = true;
-            settings.VisionApiBaseUrl = "https://open.bigmodel.cn/api/paas/v4";
-            settings.VisionModel = "glm-4.6v";
             settings.VisionScreenshotHotkey = "Ctrl+Shift+C";
             settings.SettingsVersion = 5;
         }
@@ -164,18 +162,17 @@ internal sealed class SettingsService
             settings.SettingsVersion = 10;
         }
 
+        // Version 11 uses the DeepSeek Flash endpoint for screen OCR. Obsolete
+        // vision provider fields are omitted when legacy settings are serialized.
+        if (settings.SettingsVersion < 11) settings.SettingsVersion = 11;
+        if (settings.SettingsVersion < 12) settings.SettingsVersion = 12;
+
         settings.ApiBaseUrl = string.IsNullOrWhiteSpace(settings.ApiBaseUrl)
             ? "https://api.deepseek.com"
             : settings.ApiBaseUrl.TrimEnd('/');
         settings.Model = string.IsNullOrWhiteSpace(settings.Model)
             ? "deepseek-v4-flash"
             : settings.Model.Trim();
-        settings.VisionApiBaseUrl = string.IsNullOrWhiteSpace(settings.VisionApiBaseUrl)
-            ? "https://open.bigmodel.cn/api/paas/v4"
-            : settings.VisionApiBaseUrl.TrimEnd('/');
-        settings.VisionModel = string.IsNullOrWhiteSpace(settings.VisionModel)
-            ? "glm-4.6v"
-            : settings.VisionModel.Trim();
         settings.FallbackApiBaseUrl = string.IsNullOrWhiteSpace(settings.FallbackApiBaseUrl)
             ? "https://open.bigmodel.cn/api/paas/v4"
             : settings.FallbackApiBaseUrl.TrimEnd('/');
@@ -243,8 +240,9 @@ internal sealed class SettingsService
         settings.PredictionDebounceMilliseconds = Math.Clamp(settings.PredictionDebounceMilliseconds, 150, 5000);
         settings.PredictionMinimumIntervalMilliseconds = Math.Clamp(settings.PredictionMinimumIntervalMilliseconds, 500, 5000);
         settings.TaskbarWidth = Math.Clamp(settings.TaskbarWidth, 200, 1400);
-        ClampStyle(settings.TaskbarStyle, 10, 36, 12, 54);
-        ClampStyle(settings.MobileStyle, 10, 48, 12, 72);
+        settings.TaskbarFloatingHeight = Math.Clamp(settings.TaskbarFloatingHeight, 30, 900);
+        ClampStyle(settings.TaskbarStyle, 10, 36, 12, 54, 0);
+        ClampStyle(settings.MobileStyle, 10, 48, 12, 72, 0.05);
         if (string.IsNullOrWhiteSpace(settings.MobileAccessToken) || settings.MobileAccessToken.Length < 20)
         {
             settings.MobileAccessToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant();
@@ -265,11 +263,11 @@ internal sealed class SettingsService
         }
     }
 
-    private static void ClampStyle(DisplayStyle style, double minFont, double maxFont, double minLine, double maxLine)
+    private static void ClampStyle(DisplayStyle style, double minFont, double maxFont, double minLine, double maxLine, double minOpacity)
     {
         style.FontSize = Math.Clamp(style.FontSize, minFont, maxFont);
         style.LineHeight = Math.Clamp(style.LineHeight, Math.Max(minLine, style.FontSize), maxLine);
-        style.BackgroundOpacity = Math.Clamp(style.BackgroundOpacity, 0.05, 1);
+        style.BackgroundOpacity = Math.Clamp(style.BackgroundOpacity, minOpacity, 1);
         style.BackgroundColor = string.IsNullOrWhiteSpace(style.BackgroundColor) ? "#17202A" : style.BackgroundColor.Trim();
         style.FontColor = string.IsNullOrWhiteSpace(style.FontColor) ? "#F8F9F9" : style.FontColor.Trim();
     }

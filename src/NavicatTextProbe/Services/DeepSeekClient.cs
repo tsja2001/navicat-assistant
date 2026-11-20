@@ -207,7 +207,7 @@ internal sealed class DeepSeekClient : IDisposable
 
         try
         {
-            // 未显式传入时复用屏幕识别保存的同一个智谱凭据，不需要单独配置 Key。
+            // 未显式传入时读取为 GLM 备用模型保存的凭据。
             return WindowsCredentialService.ReadZhipuApiKey();
         }
         catch

@@ -294,10 +294,9 @@ internal sealed class MobileServerService : IAsyncDisposable
                             {
                                 _settings.TaskbarPanelEnabled,
                                 _settings.TaskbarWidth,
+                                _settings.TaskbarFloatingHeight,
                                 _settings.MobileServerEnabled,
                                 _settings.VisionEnabled,
-                                _settings.VisionApiBaseUrl,
-                                _settings.VisionModel,
                                 _settings.FallbackEnabled,
                                 _settings.FallbackApiBaseUrl,
                                 _settings.FallbackModel,
@@ -611,6 +610,7 @@ internal sealed class MobileServerService : IAsyncDisposable
               <label><input id="visionEnabled" type="checkbox"> 开启主动截图识题</label>
               <label><input id="fallbackEnabled" type="checkbox"> DeepSeek 超时自动切换智谱 GLM</label>
               <div class="field"><label>任务栏期望宽度</label><input id="taskbarWidth" type="number" min="200" max="1400" step="20"></div>
+              <div class="field"><label>提示条悬浮高度</label><input id="taskbarFloatingHeight" type="number" min="30" max="900" step="1"></div>
               <div class="field"><label>智能分析当前内容快捷键</label><input id="smartActionHotkey" type="text" placeholder="Ctrl+Alt+A"></div>
               <div class="field"><label>完整答案复制快捷键</label><input id="copyFullAnswerHotkey" type="text" placeholder="Ctrl+Alt+C"></div>
               <div class="field"><label>剪贴板题目回答快捷键</label><input id="answerClipboardQuestionHotkey" type="text" placeholder="Ctrl+Alt+V"></div>
@@ -618,15 +618,13 @@ internal sealed class MobileServerService : IAsyncDisposable
               <div class="field"><label>受控逐字代打快捷键</label><input id="guidedTypingHotkey" type="text" placeholder="Ctrl+Alt+D"></div>
               <div class="field"><label>手机答案开关快捷键</label><input id="toggleMobileHotkey" type="text" placeholder="Ctrl+Alt+M"></div>
               <div class="field"><label>手机页隐私黑屏快捷键</label><input id="toggleMobilePrivacyHotkey" type="text" placeholder="Ctrl+Alt+P"></div>
-              <div class="field"><label>视觉 API 地址</label><input id="visionApiBaseUrl" type="text"></div>
-              <div class="field"><label>视觉模型</label><input id="visionModel" type="text"></div>
               <div class="field"><label>GLM 冗余 API 地址</label><input id="fallbackApiBaseUrl" type="text"></div>
               <div class="field"><label>GLM 冗余模型</label><input id="fallbackModel" type="text"></div>
               <div class="field"><label>任务栏字号</label><input id="taskbarFont" type="number" min="10" max="36" step="1"></div>
               <div class="field"><label>任务栏行高</label><input id="taskbarLine" type="number" min="12" max="54" step="1"></div>
               <div class="field"><label>任务栏背景色</label><input id="taskbarBg" type="color"></div>
               <div class="field"><label>任务栏字体色</label><input id="taskbarFg" type="color"></div>
-              <div class="field"><label>任务栏透明度</label><input id="taskbarOpacity" type="number" min="0.05" max="1" step="0.05"></div>
+              <div class="field"><label>提示条背景不透明度（0 全透明）</label><input id="taskbarOpacity" type="number" min="0" max="1" step="0.01"></div>
               <div class="field"><label>手机建议字号</label><input id="mobileFont" type="number" min="10" max="48" step="1"></div>
               <div class="field"><label>手机建议行高</label><input id="mobileLine" type="number" min="12" max="72" step="1"></div>
               <div class="field"><label>手机卡片背景色</label><input id="mobileBg" type="color"></div>
@@ -650,17 +648,18 @@ internal sealed class MobileServerService : IAsyncDisposable
                 $('visionEnabled').checked=!!c.visionEnabled;
                 $('fallbackEnabled').checked=!!c.fallbackEnabled;
                 $('taskbarWidth').value=c.taskbarWidth||640;
+                $('taskbarFloatingHeight').value=c.taskbarFloatingHeight??160;
                 $('smartActionHotkey').value=c.smartActionHotkey||'Ctrl+Alt+A';
                 $('copyFullAnswerHotkey').value=c.copyFullAnswerHotkey||'Ctrl+Alt+C';
                 $('answerClipboardQuestionHotkey').value=c.answerClipboardQuestionHotkey||'Ctrl+Alt+V';
                 $('visionScreenshotHotkey').value=c.visionScreenshotHotkey||'Ctrl+Alt+O';
                 $('guidedTypingHotkey').value=c.guidedTypingHotkey||'Ctrl+Alt+D';
                 $('toggleMobileHotkey').value=c.toggleMobileHotkey||'Ctrl+Alt+M';$('toggleMobilePrivacyHotkey').value=c.toggleMobilePrivacyHotkey||'Ctrl+Alt+P';
-                $('visionApiBaseUrl').value=c.visionApiBaseUrl||'https://open.bigmodel.cn/api/paas/v4';$('visionModel').value=c.visionModel||'glm-4.6v';$('fallbackApiBaseUrl').value=c.fallbackApiBaseUrl||'https://open.bigmodel.cn/api/paas/v4';$('fallbackModel').value=c.fallbackModel||'glm-5.2';
-                $('taskbarFont').value=t.fontSize||14;$('taskbarLine').value=t.lineHeight||21;$('taskbarBg').value=t.backgroundColor||'#17202a';$('taskbarFg').value=t.fontColor||'#f8f9f9';$('taskbarOpacity').value=t.backgroundOpacity||.92;
+                $('fallbackApiBaseUrl').value=c.fallbackApiBaseUrl||'https://open.bigmodel.cn/api/paas/v4';$('fallbackModel').value=c.fallbackModel||'glm-5.2';
+                $('taskbarFont').value=t.fontSize||14;$('taskbarLine').value=t.lineHeight||21;$('taskbarBg').value=t.backgroundColor||'#17202a';$('taskbarFg').value=t.fontColor||'#f8f9f9';$('taskbarOpacity').value=t.backgroundOpacity??.92;
                 $('mobileFont').value=m.fontSize||18;$('mobileLine').value=m.lineHeight||28;$('mobileBg').value=m.backgroundColor||'#151d27';$('mobileFg').value=m.fontColor||'#7df2b1';$('mobileOpacity').value=m.backgroundOpacity||.96;}}
               catch(e){$('display').textContent='无法连接电脑端：'+e.message}}
-            $('save').onclick=async()=>{const body={taskbarPanelEnabled:$('taskbarPanelEnabled').checked,visionEnabled:$('visionEnabled').checked,visionApiBaseUrl:$('visionApiBaseUrl').value.trim(),visionModel:$('visionModel').value.trim(),fallbackEnabled:$('fallbackEnabled').checked,fallbackApiBaseUrl:$('fallbackApiBaseUrl').value.trim(),fallbackModel:$('fallbackModel').value.trim(),taskbarWidth:+$('taskbarWidth').value,smartActionHotkey:$('smartActionHotkey').value.trim(),copyFullAnswerHotkey:$('copyFullAnswerHotkey').value.trim(),answerClipboardQuestionHotkey:$('answerClipboardQuestionHotkey').value.trim(),visionScreenshotHotkey:$('visionScreenshotHotkey').value.trim(),guidedTypingHotkey:$('guidedTypingHotkey').value.trim(),toggleMobileHotkey:$('toggleMobileHotkey').value.trim(),toggleMobilePrivacyHotkey:$('toggleMobilePrivacyHotkey').value.trim(),taskbarFontSize:+$('taskbarFont').value,taskbarLineHeight:+$('taskbarLine').value,taskbarBackgroundColor:$('taskbarBg').value,taskbarFontColor:$('taskbarFg').value,taskbarOpacity:+$('taskbarOpacity').value,mobileFontSize:+$('mobileFont').value,mobileLineHeight:+$('mobileLine').value,mobileBackgroundColor:$('mobileBg').value,mobileFontColor:$('mobileFg').value,mobileOpacity:+$('mobileOpacity').value};
+            $('save').onclick=async()=>{const body={taskbarPanelEnabled:$('taskbarPanelEnabled').checked,visionEnabled:$('visionEnabled').checked,fallbackEnabled:$('fallbackEnabled').checked,fallbackApiBaseUrl:$('fallbackApiBaseUrl').value.trim(),fallbackModel:$('fallbackModel').value.trim(),taskbarWidth:+$('taskbarWidth').value,taskbarFloatingHeight:+$('taskbarFloatingHeight').value,smartActionHotkey:$('smartActionHotkey').value.trim(),copyFullAnswerHotkey:$('copyFullAnswerHotkey').value.trim(),answerClipboardQuestionHotkey:$('answerClipboardQuestionHotkey').value.trim(),visionScreenshotHotkey:$('visionScreenshotHotkey').value.trim(),guidedTypingHotkey:$('guidedTypingHotkey').value.trim(),toggleMobileHotkey:$('toggleMobileHotkey').value.trim(),toggleMobilePrivacyHotkey:$('toggleMobilePrivacyHotkey').value.trim(),taskbarFontSize:+$('taskbarFont').value,taskbarLineHeight:+$('taskbarLine').value,taskbarBackgroundColor:$('taskbarBg').value,taskbarFontColor:$('taskbarFg').value,taskbarOpacity:+$('taskbarOpacity').value,mobileFontSize:+$('mobileFont').value,mobileLineHeight:+$('mobileLine').value,mobileBackgroundColor:$('mobileBg').value,mobileFontColor:$('mobileFg').value,mobileOpacity:+$('mobileOpacity').value};
               const r=await fetch(api('/api/settings'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});$('saved').textContent=r.ok?'已保存':'保存失败';setTimeout(()=>$('saved').textContent='',1800)};
             refresh();setInterval(refresh,1200);
             if('serviceWorker' in navigator){try{navigator.serviceWorker.register('/sw.js?token='+encodeURIComponent(token)).catch(()=>{})}catch(e){}}
@@ -673,12 +672,11 @@ internal sealed record MobileSettingsPatch
 {
     public bool? TaskbarPanelEnabled { get; init; }
     public bool? VisionEnabled { get; init; }
-    public string? VisionApiBaseUrl { get; init; }
-    public string? VisionModel { get; init; }
     public bool? FallbackEnabled { get; init; }
     public string? FallbackApiBaseUrl { get; init; }
     public string? FallbackModel { get; init; }
     public double? TaskbarWidth { get; init; }
+    public double? TaskbarFloatingHeight { get; init; }
     public string? SmartActionHotkey { get; init; }
     public string? CopyFullAnswerHotkey { get; init; }
     public string? AnswerClipboardQuestionHotkey { get; init; }

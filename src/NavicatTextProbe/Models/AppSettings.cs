@@ -33,8 +33,6 @@ public sealed record AppSettings
     public string ApiBaseUrl { get; set; } = "https://api.deepseek.com";
     public string Model { get; set; } = "deepseek-v4-flash";
     public bool VisionEnabled { get; set; } = true;
-    public string VisionApiBaseUrl { get; set; } = "https://open.bigmodel.cn/api/paas/v4";
-    public string VisionModel { get; set; } = "glm-4.6v";
     public bool FallbackEnabled { get; set; } = true;
     public string FallbackApiBaseUrl { get; set; } = "https://open.bigmodel.cn/api/paas/v4";
     public string FallbackModel { get; set; } = "glm-5.2";
@@ -44,6 +42,7 @@ public sealed record AppSettings
     public int PredictionMinimumIntervalMilliseconds { get; set; } = 1400;
     public bool TaskbarPanelEnabled { get; set; } = true;
     public double TaskbarWidth { get; set; } = 640;
+    public double TaskbarFloatingHeight { get; set; } = 160;
     public bool MobileServerEnabled { get; set; }
     public bool KeyboardFallbackEnabled { get; set; }
     public bool GuidedTypingEnabled { get; set; } = true;

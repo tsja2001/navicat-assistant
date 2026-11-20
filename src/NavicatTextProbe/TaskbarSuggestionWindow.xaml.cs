@@ -7,24 +7,39 @@ using NavicatTextProbe.Native;
 using NavicatTextProbe.Services;
 using Color = System.Windows.Media.Color;
 using ColorConverter = System.Windows.Media.ColorConverter;
+using PixelPoint = System.Drawing.Point;
 
 namespace NavicatTextProbe;
 
 public partial class TaskbarSuggestionWindow : Window
 {
     private readonly DispatcherTimer _positionTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private readonly DispatcherTimer _dragTimer = new() { Interval = TimeSpan.FromMilliseconds(16) };
     private HwndSource? _windowSource;
     private nint _windowHandle;
     private double _preferredWidth = 640;
+    private double _floatingHeight = 160;
     private double _pageHeight = 30;
     private int _currentPageIndex;
     private int _pageCount = 1;
     private bool _paginationRefreshQueued;
+    private PixelPoint? _dragOffset;
+    private PixelPoint? _floatingPosition;
+    private NativeMethods.NativeRect? _resizeStart;
+    private bool _resizeTopLeft;
+    private bool _sizeChangedByPointer;
 
     public TaskbarSuggestionWindow()
     {
         InitializeComponent();
+        SuggestionScroller.ScrollChanged += (_, _) => QueuePaginationRefresh();
         SourceInitialized += (_, _) => ConfigureToolWindow();
+        _dragTimer.Tick += (_, _) =>
+        {
+            // A non-activating window can miss mouse messages when a fast drag leaves its bounds.
+            if (NativeMethods.GetAsyncKeyState(1) >= 0) EndDrag();
+            else MoveWithPointer(System.Windows.Forms.Cursor.Position);
+        };
         _positionTimer.Tick += (_, _) =>
         {
             if (IsVisible) Reposition();
@@ -40,6 +55,7 @@ public partial class TaskbarSuggestionWindow : Window
             else
             {
                 _positionTimer.Stop();
+                if (_dragOffset.HasValue) EndDrag();
             }
         };
         StateChanged += (_, _) =>
@@ -53,6 +69,7 @@ public partial class TaskbarSuggestionWindow : Window
         Closed += (_, _) =>
         {
             _positionTimer.Stop();
+            _dragTimer.Stop();
             _windowSource?.RemoveHook(WindowProc);
             _windowSource = null;
         };
@@ -61,14 +78,22 @@ public partial class TaskbarSuggestionWindow : Window
     public event EventHandler? SettingsRequested;
 
     public event EventHandler? HideAssistantRequested;
+    internal event Action<double, double>? FloatingSizeChanged;
 
-    public void UpdateSuggestion(SuggestionResult suggestion, DisplayStyle style, double preferredWidth)
+    internal bool CaptureExcluded { get; private set; }
+
+    public void UpdateSuggestion(SuggestionResult suggestion, DisplayStyle style, double preferredWidth, double floatingHeight = 160)
     {
-        _preferredWidth = Math.Clamp(preferredWidth, 200, 1400);
-        SuggestionText.Text = TaskbarSuggestionFormatter.BuildText(suggestion);
+        if (_resizeStart is null)
+        {
+            _preferredWidth = Math.Clamp(preferredWidth, 200, 1400);
+            _floatingHeight = Math.Clamp(floatingHeight, 30, 900);
+        }
+        var text = TaskbarSuggestionFormatter.BuildText(suggestion);
+        var changed = SuggestionText.Text != text;
+        if (changed) SuggestionText.Text = text;
         SuggestionText.FontSize = style.FontSize;
         SuggestionText.LineHeight = style.LineHeight;
-        SuggestionScroller.MaxHeight = style.LineHeight * 2 + 1;
         SuggestionText.Foreground = ParseBrush(style.FontColor, Colors.White);
         PageIndicator.FontSize = Math.Max(9, style.FontSize - 2);
         PageIndicator.Foreground = ParseBrush(style.FontColor, Colors.White);
@@ -76,7 +101,8 @@ public partial class TaskbarSuggestionWindow : Window
             style.BackgroundColor,
             Color.FromRgb(32, 32, 32),
             style.BackgroundOpacity);
-        ResetPagination();
+        if (changed) ResetPagination();
+        else QueuePaginationRefresh();
         if (IsVisible) Reposition();
     }
 
@@ -98,14 +124,10 @@ public partial class TaskbarSuggestionWindow : Window
         }
 
         RefreshPagination();
-        var targetPage = Math.Clamp(_currentPageIndex + Math.Sign(direction), 0, _pageCount - 1);
-        if (targetPage == _currentPageIndex)
-        {
-            return false;
-        }
-
-        _currentPageIndex = targetPage;
-        ApplyCurrentPage();
+        var offset = SuggestionScroller.VerticalOffset;
+        var target = Math.Clamp(offset + Math.Sign(direction) * _pageHeight, 0, SuggestionScroller.ScrollableHeight);
+        if (Math.Abs(offset - target) < 0.01) return false;
+        SuggestionScroller.ScrollToVerticalOffset(target);
         return true;
     }
 
@@ -125,6 +147,12 @@ public partial class TaskbarSuggestionWindow : Window
 
     public void Reposition()
     {
+        if (_resizeStart.HasValue) return;
+        if (_floatingPosition is PixelPoint position)
+        {
+            PositionFloatingWindow(position, System.Windows.Forms.Screen.FromPoint(position));
+            return;
+        }
         var taskbar = NativeMethods.FindWindow("Shell_TrayWnd", null);
         if (taskbar == 0 || !NativeMethods.GetWindowRect(taskbar, out var taskbarRect) || taskbarRect.Width <= taskbarRect.Height)
         {
@@ -229,7 +257,7 @@ public partial class TaskbarSuggestionWindow : Window
     private void RefreshPagination()
     {
         UpdateLayout();
-        _pageHeight = ResolvePageHeight();
+        _pageHeight = Math.Max(1, SuggestionScroller.ViewportHeight);
         var pageCountWithoutIndicator = CalculatePageCount(SuggestionScroller.ExtentHeight, _pageHeight);
         var needsIndicator = pageCountWithoutIndicator > 1;
         PageIndicator.Text = $"{_currentPageIndex + 1}/{pageCountWithoutIndicator}";
@@ -241,43 +269,19 @@ public partial class TaskbarSuggestionWindow : Window
             PageIndicator.Visibility = needsIndicator ? Visibility.Visible : Visibility.Collapsed;
             PageIndicatorColumn.Width = new GridLength(indicatorWidth);
             UpdateLayout();
-            _pageHeight = ResolvePageHeight();
+            _pageHeight = Math.Max(1, SuggestionScroller.ViewportHeight);
         }
 
         _pageCount = CalculatePageCount(SuggestionScroller.ExtentHeight, _pageHeight);
-        _currentPageIndex = Math.Clamp(_currentPageIndex, 0, _pageCount - 1);
+        _currentPageIndex = SuggestionScroller.VerticalOffset >= SuggestionScroller.ScrollableHeight - 0.5
+            ? _pageCount - 1
+            : Math.Clamp((int)(SuggestionScroller.VerticalOffset / _pageHeight), 0, _pageCount - 1);
         if (_pageCount <= 1)
         {
             PageIndicator.Visibility = Visibility.Collapsed;
             PageIndicatorColumn.Width = new GridLength(0);
         }
-        ApplyCurrentPage();
-    }
-
-    private double ResolvePageHeight()
-    {
-        var viewportHeight = SuggestionScroller.ViewportHeight;
-        if (!double.IsFinite(viewportHeight) || viewportHeight <= 0)
-        {
-            viewportHeight = SuggestionScroller.ActualHeight;
-        }
-
-        var lineHeight = SuggestionText.LineHeight;
-        if (!double.IsFinite(lineHeight) || lineHeight <= 0)
-        {
-            lineHeight = Math.Max(1, SuggestionText.FontSize * 1.2);
-        }
-
-        var visibleLines = Math.Max(1, (int)Math.Floor((viewportHeight + 0.5) / lineHeight));
-        return visibleLines * lineHeight;
-    }
-
-    private void ApplyCurrentPage()
-    {
-        var maximumOffset = Math.Max(0, SuggestionScroller.ExtentHeight - SuggestionScroller.ViewportHeight);
-        SuggestionScroller.ScrollToVerticalOffset(Math.Min(_currentPageIndex * _pageHeight, maximumOffset));
         PageIndicator.Text = $"{_currentPageIndex + 1}/{_pageCount}";
-        PageIndicator.Visibility = _pageCount > 1 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void ConfigureToolWindow()
@@ -292,21 +296,148 @@ public partial class TaskbarSuggestionWindow : Window
         extendedStyle |= NativeMethods.WsExToolWindow | NativeMethods.WsExNoActivate;
         extendedStyle &= ~NativeMethods.WsExAppWindow;
         _ = NativeMethods.SetWindowLongPtr(_windowHandle, NativeMethods.GwlExStyle, new nint(extendedStyle));
-
         _windowSource = HwndSource.FromHwnd(_windowHandle);
+        ConfigureComposition();
         _windowSource?.AddHook(WindowProc);
         KeepAboveWindowsWithoutActivation();
     }
 
     private nint WindowProc(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
     {
+        if (message == 0x031E) ConfigureComposition(); // WM_DWMCOMPOSITIONCHANGED
+        if (message == 0x020A) // WM_MOUSEWHEEL
+        {
+            var delta = unchecked((short)(wParam.ToInt64() >> 16));
+            var lines = SystemParameters.WheelScrollLines;
+            var step = lines < 0 ? SuggestionScroller.ViewportHeight : lines * SuggestionText.LineHeight;
+            SuggestionScroller.ScrollToVerticalOffset(SuggestionScroller.VerticalOffset - step * delta / 120d);
+            handled = true;
+            return 0;
+        }
         if (message == NativeMethods.WmMouseActivate)
         {
             handled = true;
             return NativeMethods.MaNoActivate;
         }
 
+        if (message == NativeMethods.WmLeftButtonDown)
+        {
+            var point = MousePoint(lParam);
+            var scale = VisualTreeHelper.GetDpi(this);
+            var hit = InputHitTest(new System.Windows.Point(point.X / scale.DpiScaleX, point.Y / scale.DpiScaleY)) as DependencyObject;
+            while (hit != null && hit != TopLeftGrip && hit != BottomRightGrip)
+            {
+                if (hit is System.Windows.Controls.Primitives.ScrollBar) return 0;
+                hit = hit is Visual ? VisualTreeHelper.GetParent(hit) : LogicalTreeHelper.GetParent(hit);
+            }
+            if (hit != null && NativeMethods.GetWindowRect(hwnd, out var rect))
+            {
+                _resizeStart = rect;
+                _resizeTopLeft = hit == TopLeftGrip;
+            }
+            _dragOffset = point;
+            NativeMethods.SetCapture(hwnd);
+            _dragTimer.Start();
+            handled = true;
+        }
+        else if (message == NativeMethods.WmMouseMove && _dragOffset.HasValue)
+        {
+            if ((wParam.ToInt64() & 1) == 0)
+            {
+                EndDrag();
+            }
+            else if (NativeMethods.GetWindowRect(hwnd, out var rect))
+            {
+                var relative = MousePoint(lParam);
+                MoveWithPointer(new PixelPoint(rect.Left + relative.X, rect.Top + relative.Y));
+            }
+            handled = true;
+        }
+        else if (message == NativeMethods.WmLeftButtonUp && _dragOffset.HasValue)
+        {
+            EndDrag();
+            handled = true;
+        }
+        else if (message == NativeMethods.WmCaptureChanged)
+        {
+            FinishPointerGesture();
+        }
         return 0;
+    }
+
+    private static PixelPoint MousePoint(nint lParam) =>
+        new(unchecked((short)lParam.ToInt64()), unchecked((short)(lParam.ToInt64() >> 16)));
+
+    private void EndDrag()
+    {
+        FinishPointerGesture();
+        NativeMethods.ReleaseCapture();
+    }
+
+    private void FinishPointerGesture()
+    {
+        _dragTimer.Stop();
+        _dragOffset = null;
+        _resizeStart = null;
+        if (_sizeChangedByPointer)
+        {
+            _sizeChangedByPointer = false;
+            FloatingSizeChanged?.Invoke(_preferredWidth, _floatingHeight);
+        }
+    }
+
+    private void MoveWithPointer(PixelPoint pointer)
+    {
+        if (_dragOffset is not PixelPoint offset || !NativeMethods.GetWindowRect(_windowHandle, out var rect)) return;
+        if (_resizeStart is { } start)
+        {
+            var scale = VisualTreeHelper.GetDpi(this);
+            int dx = pointer.X - start.Left - offset.X, dy = pointer.Y - start.Top - offset.Y;
+            if (dx == 0 && dy == 0 && !_sizeChangedByPointer) return;
+            var sign = _resizeTopLeft ? -1 : 1;
+            _preferredWidth = Math.Clamp((start.Width + (double)sign * dx) / scale.DpiScaleX, 200, 1400);
+            _floatingHeight = Math.Clamp((start.Height + (double)sign * dy) / scale.DpiScaleY, 30, 900);
+            var anchor = _resizeTopLeft
+                ? new PixelPoint(start.Right - (int)Math.Round(_preferredWidth * scale.DpiScaleX),
+                    start.Bottom - (int)Math.Round(_floatingHeight * scale.DpiScaleY))
+                : new PixelPoint(start.Left, start.Top);
+            _sizeChangedByPointer = true;
+            PositionFloatingWindow(anchor, System.Windows.Forms.Screen.FromPoint(pointer));
+            return;
+        }
+        var position = new PixelPoint(pointer.X - offset.X, pointer.Y - offset.Y);
+        if (position.X != rect.Left || position.Y != rect.Top)
+            PositionFloatingWindow(position, System.Windows.Forms.Screen.FromPoint(pointer));
+    }
+
+    private void PositionFloatingWindow(PixelPoint position, System.Windows.Forms.Screen screen)
+    {
+        var bounds = screen.Bounds;
+        var dpi = NativeMethods.GetDpiForWindow(_windowHandle);
+        var scale = dpi == 0 ? 1 : dpi / 96d;
+        var width = Math.Min(bounds.Width, (int)Math.Round(_preferredWidth * scale));
+        var height = Math.Min(bounds.Height, (int)Math.Round(_floatingHeight * scale));
+        var left = Math.Clamp(position.X, bounds.Left, bounds.Right - width);
+        var top = Math.Clamp(position.Y, bounds.Top, bounds.Bottom - height);
+        _floatingPosition = new PixelPoint(left, top);
+        NativeMethods.SetWindowPos(_windowHandle, NativeMethods.HwndTopmost,
+            left, top, width, height, NativeMethods.SwpNoActivate);
+    }
+
+    private void DockMenuItem_OnClick(object sender, RoutedEventArgs e)
+    {
+        _floatingPosition = null;
+        Reposition();
+    }
+
+    private void ConfigureComposition()
+    {
+        if (_windowSource?.CompositionTarget is { } target)
+        {
+            target.BackgroundColor = NativeMethods.EnableClientTransparency(_windowHandle)
+                ? Colors.Transparent : Color.FromRgb(32, 32, 32);
+        }
+        CaptureExcluded = NativeMethods.ExcludeFromScreenCapture(_windowHandle);
     }
 
     private void KeepAboveWindowsWithoutActivation()
@@ -334,13 +465,13 @@ public partial class TaskbarSuggestionWindow : Window
         try
         {
             var brush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(value));
-            brush.Opacity = Math.Clamp(opacity, 0.05, 1);
+            brush.Opacity = Math.Clamp(opacity, 0, 1);
             return brush;
         }
         catch
         {
             var brush = new SolidColorBrush(fallback);
-            brush.Opacity = Math.Clamp(opacity, 0.05, 1);
+            brush.Opacity = Math.Clamp(opacity, 0, 1);
             return brush;
         }
     }

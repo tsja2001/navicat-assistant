@@ -24,7 +24,7 @@ public partial class MainWindow : Window
     private readonly ProbeLogger _logger;
     private readonly SettingsService _settingsService;
     private readonly DeepSeekClient _deepSeekClient = new();
-    private readonly ZhipuVisionClient _zhipuVisionClient = new();
+    private readonly DeepSeekVisionClient _deepSeekVisionClient = new();
     private readonly NavicatSelectionService _selectionService = new();
     private readonly GlobalHotkeyService _hotkeyService = new();
     private readonly KeyboardFallbackService _keyboardFallbackService = new();
@@ -58,7 +58,8 @@ public partial class MainWindow : Window
     private string? _manualCandidateContext;
     private string? _manualCandidateRequestProbeKey;
     private string? _apiKey;
-    private string? _visionApiKey;
+    private string? _screenOcrKey;
+    private bool _hasSavedScreenOcrKey;
     private string? _databasePassword;
     private DatabaseCatalogSnapshot? _databaseCatalog;
     private string _databaseStatus = "未使用数据库增强";
@@ -99,19 +100,36 @@ public partial class MainWindow : Window
         _visionScreenshotCaptureService = new VisionScreenshotCaptureService(_documentContextProbeService);
         _trayIcon = new TrayIconService();
         _apiKey = SafeReadApiKey();
-        _visionApiKey = SafeReadVisionApiKey();
+        try
+        {
+            _screenOcrKey = WindowsCredentialService.ReadScreenOcrKey();
+            _hasSavedScreenOcrKey = !string.IsNullOrWhiteSpace(_screenOcrKey);
+            RememberScreenOcrKeyBox.IsChecked = _hasSavedScreenOcrKey;
+            DeleteScreenOcrKeyButton.IsEnabled = _hasSavedScreenOcrKey;
+            ScreenOcrKeyStatus.Text = _hasSavedScreenOcrKey ? "已载入保存的密钥" : "请输入密钥后点应用";
+        }
+        catch (Win32Exception)
+        {
+            DeleteScreenOcrKeyButton.IsEnabled = true;
+            ScreenOcrKeyStatus.Text = "无法读取已保存的密钥，可手动输入";
+        }
         _databasePassword = SafeReadDatabasePassword(_settingsService.Current.DatabaseConnection.ProfileId);
 
         LogPathText.Text = $"日志：{Path.GetFileName(_logger.LogPath)}";
         _probeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(550) };
         _probeTimer.Tick += ProbeTimer_OnTick;
 
-        SourceInitialized += (_, _) => RegisterHotkeys();
+        SourceInitialized += (_, _) =>
+        {
+            _mainWindowCaptureExcluded = NativeMethods.ExcludeFromScreenCapture(new WindowInteropHelper(this).Handle);
+            RegisterHotkeys();
+        };
         Loaded += MainWindow_OnLoaded;
         Closing += MainWindow_OnClosing;
         Closed += MainWindow_OnClosed;
 
-        _taskbarWindow.SettingsRequested += (_, _) => OpenSettings();
+        _taskbarWindow.SettingsRequested += (_, _) => OpenSettings(showAppearance: true);
+        _taskbarWindow.FloatingSizeChanged += SaveFloatingSize;
         _taskbarWindow.HideAssistantRequested += (_, _) => SetAssistantEnabledAsync(false).Forget();
 
         _hotkeyService.Pressed += HotkeyService_OnPressed;
@@ -127,6 +145,8 @@ public partial class MainWindow : Window
         _trayIcon.ToggleMobileRequested += (_, _) => Dispatcher.Invoke(() => ToggleMobileAsync().Forget());
         _trayIcon.ExitRequested += (_, _) => Dispatcher.Invoke(() => ExitAsync().Forget());
     }
+
+    private bool _mainWindowCaptureExcluded;
 
     private async void MainWindow_OnLoaded(object sender, RoutedEventArgs e)
     {
@@ -147,9 +167,16 @@ public partial class MainWindow : Window
         {
             FirewallStatusText.Text = "防火墙：手机服务未运行，暂不检测";
         }
-        UpdateSuggestion(_apiKey is null
-            ? SuggestionResult.Info("请先打开设置，保存撤销旧 Key 后生成的新 DeepSeek API Key")
-            : _currentSuggestion);
+        ShowVisionReadyHint();
+    }
+
+    private void ShowVisionReadyHint()
+    {
+        var settings = _settingsService.Current;
+        if (settings.AssistantEnabled && settings.VisionEnabled)
+            UpdateSuggestion(SuggestionResult.Info(string.IsNullOrWhiteSpace(_screenOcrKey)
+                ? $"截图测试已就绪，按 {settings.VisionScreenshotHotkey}。联网答题请在主窗口输入 DeepSeek OCR 密钥。"
+                : $"按 {settings.VisionScreenshotHotkey} 识别当前屏幕，答案显示在此处。"));
     }
 
     private async void ProbeTimer_OnTick(object? sender, EventArgs e)
@@ -1078,8 +1105,10 @@ public partial class MainWindow : Window
                 if (stateChanged)
                 {
                     StatusDot.Fill = Brush(243, 156, 18);
-                    StatusText.Text = "等待 Navicat 成为前台窗口……";
-                    DetailText.Text = "切回 Navicat 查询编辑器继续输入；主窗口可以关闭到系统托盘。";
+                    StatusText.Text = _settingsService.Current.VisionEnabled ? "屏幕识别已就绪" : "等待 Navicat 成为前台窗口……";
+                    DetailText.Text = _settingsService.Current.VisionEnabled
+                        ? $"切到要识别的窗口并按 {_settingsService.Current.VisionScreenshotHotkey}，在可拖动的提示条上查看答案。"
+                        : "切回 Navicat 查询编辑器继续输入。";
                 }
                 if (stateChanged) _logger.WriteState(result);
                 break;
@@ -1564,16 +1593,11 @@ public partial class MainWindow : Window
         }
         if (!_settingsService.Current.VisionEnabled)
         {
-            UpdateSuggestion(SuggestionResult.Info("截图识题已在设置中关闭"));
+            UpdateSuggestion(SuggestionResult.Info("屏幕 OCR 已在设置中关闭"));
             return;
         }
-        if (string.IsNullOrWhiteSpace(_visionApiKey))
-        {
-            UpdateSuggestion(SuggestionResult.Info("请先在设置中保存新的智谱 API Key"));
-            return;
-        }
-
         CancelVisionRequest();
+        CancelCopyAnswerRequest();
         _predictionCancellation?.Cancel();
         _predictionCancellation?.Dispose();
         _predictionCancellation = null;
@@ -1588,6 +1612,8 @@ public partial class MainWindow : Window
         var stopwatch = Stopwatch.StartNew();
         try
         {
+            _logger.WriteDiagnostic("vision_hotkey", "已收到屏幕识别请求");
+            UpdateSuggestion(SuggestionResult.Loading("已收到快捷键，正在截图……"));
             var capture = await _visionScreenshotCaptureService.CaptureAsync(
                 token,
                 _settingsService.Current.VisionCaptureScope);
@@ -1599,59 +1625,26 @@ public partial class MainWindow : Window
             _logger.WriteVisionCapture(capture, stopwatch.ElapsedMilliseconds);
             if (!capture.IsCaptured)
             {
-                UpdateSuggestion(SuggestionResult.Error("无法截图识别当前题目", capture.Message));
+                UpdateSuggestion(SuggestionResult.Error("无法截取前台画面", capture.Message));
                 return;
             }
             _lastVisionHasReliableCaret = capture.HasReliableCaret;
 
-            UpdateSuggestion(SuggestionResult.Loading("正在识别截图中光标所在题目……"));
-            var result = await _zhipuVisionClient.AnswerExerciseAsync(
+            if (string.IsNullOrWhiteSpace(_screenOcrKey))
+            {
+                UpdateSuggestion(SuggestionResult.Info("截图成功。请在主窗口输入 DeepSeek OCR 密钥并点应用，再按快捷键获取答案。"));
+                _logger.WriteDiagnostic("vision_model", "缺少 DeepSeek OCR 密钥");
+                return;
+            }
+            UpdateSuggestion(SuggestionResult.Loading("正在识别截图……"));
+            var result = await _deepSeekVisionClient.AnswerExerciseAsync(
                 _settingsService.Current,
-                _visionApiKey,
+                _screenOcrKey,
                 capture,
                 token);
             if (token.IsCancellationRequested || requestSequence != Volatile.Read(ref _visionRequestSequence))
             {
                 return;
-            }
-
-            if (result.Mode == SuggestionMode.ExerciseAnswer)
-            {
-                if (result.Confidence < WordExerciseContextBuilder.MinimumExerciseConfidence ||
-                    string.Equals(result.AnswerState, "uncertain", StringComparison.OrdinalIgnoreCase))
-                {
-                    result = SuggestionResult.Error(
-                        "截图中的题目或作答位置不够清晰",
-                        string.IsNullOrWhiteSpace(result.Explanation)
-                            ? "请放大题目、确认文本光标可见后重新截图。"
-                            : result.Explanation) with
-                    {
-                        Origin = "vision_screenshot",
-                        Confidence = result.Confidence
-                    };
-                }
-                else
-                {
-                    var continuation = string.Equals(
-                        result.AnswerState,
-                        "partial",
-                        StringComparison.OrdinalIgnoreCase);
-                    var taskbarAnswer = WordExercisePresentation.SelectTaskbarAnswer(
-                        result,
-                        result.QuestionType,
-                        result.FullAnswer,
-                        result.InsertText,
-                        continuation);
-                    result = result with
-                    {
-                        DisplayText = WordExercisePresentation.BuildDisplayText(
-                            taskbarAnswer,
-                            result.InsertText,
-                            result.QuestionType,
-                            result.QuestionNumber,
-                            continuation)
-                    };
-                }
             }
 
             _logger.WriteSuggestion(
@@ -1667,7 +1660,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            _logger.WriteDiagnostic("vision_screenshot", ex.ToString());
+            _logger.WriteDiagnostic("vision_screenshot", ex.GetType().Name);
             if (requestSequence == Volatile.Read(ref _visionRequestSequence))
             {
                 UpdateSuggestion(SuggestionResult.Error("截图识题发生异常", ex.Message));
@@ -1797,19 +1790,22 @@ public partial class MainWindow : Window
         _taskbarWindow.UpdateSuggestion(
             suggestion,
             _settingsService.Current.TaskbarStyle,
-            _settingsService.Current.TaskbarWidth);
+            _settingsService.Current.TaskbarWidth,
+            _settingsService.Current.TaskbarFloatingHeight);
         _mobileServer.UpdateSuggestion(suggestion, _settingsService.Current);
         RefreshRuntimeIndicators();
     }
 
     private void UpdateMainSuggestionView(SuggestionResult suggestion)
     {
+        var isScreenResult = suggestion.IsScreenResult;
         SuggestionModeText.Text = suggestion.HasCandidates
             ? $"候选 {suggestion.ActiveCandidateIndex + 1}/{suggestion.Candidates.Count}"
             : suggestion.Mode switch
         {
             SuggestionMode.Completion => "补全",
             SuggestionMode.Diagnosis => "诊断",
+            SuggestionMode.ExerciseAnswer when isScreenResult => "屏幕回答",
             SuggestionMode.ExerciseAnswer => "题目回答",
             SuggestionMode.ExerciseContinuation => "题目续写",
             SuggestionMode.Error => "错误",
@@ -1817,15 +1813,19 @@ public partial class MainWindow : Window
         };
         SuggestionDisplayText.Text = string.IsNullOrWhiteSpace(suggestion.DisplayText) ? "当前没有足够可靠的建议" : suggestion.DisplayText;
         SuggestionExplanationText.Text = string.IsNullOrWhiteSpace(suggestion.Explanation)
-            ? suggestion.IsLoading ? "输入变化时，旧请求会自动取消。" : "短建议显示在任务栏；完整内容可在此处和手机端查看。"
+            ? suggestion.IsLoading ? "输入变化时，旧请求会自动取消。" : "完整建议也可在悬浮提示条中滚动阅读。"
             : suggestion.Explanation;
-        SuggestionInsertTextBox.Text = string.IsNullOrWhiteSpace(suggestion.InsertText) ? "—" : suggestion.InsertText;
+        SuggestionInsertLabel.Text = isScreenResult ? "答案或补全内容" : "可插入/替换的 SQL";
+        var suggestedText = suggestion.FullSuggestionText;
+        SuggestionInsertTextBox.Text = string.IsNullOrWhiteSpace(suggestedText) ? "—" : suggestedText;
+        ScreenOcrTextBox.Text = isScreenResult ? suggestion.QuestionText : string.Empty;
+        ScreenOcrTab.Visibility = ScreenOcrTextBox.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         IssuesText.Text = suggestion.HasCandidates
             ? $"再次按 {_settingsService.Current.CycleCandidatesHotkey} 切换下一个候选；当前为第 {suggestion.ActiveCandidateIndex + 1} 个，共 {suggestion.Candidates.Count} 个。"
             : suggestion.Origin.StartsWith("clipboard_question", StringComparison.Ordinal)
                 ? $"剪贴板题目已经回答；按 Ctrl+V 粘贴答案。再次复制一道题后按 {_settingsService.Current.AnswerClipboardQuestionHotkey} 可继续。"
             : string.Equals(suggestion.Origin, "vision_screenshot", StringComparison.Ordinal)
-                ? $"视觉截图结果；把光标放到其他题目后按 {_settingsService.Current.VisionScreenshotHotkey} 可重新识别。"
+                ? $"切回要识别的窗口，按 {_settingsService.Current.VisionScreenshotHotkey} 可以重新截图。"
             : suggestion.Mode == SuggestionMode.ExerciseAnswer
                 ? $"完整题目、答案和解析已同步到手机页；移动到新题后按 {_settingsService.Current.WordExerciseHotkey} 识别并切换，同题再次按下可强制刷新。"
                 : suggestion.Mode == SuggestionMode.ExerciseContinuation
@@ -1895,7 +1895,11 @@ public partial class MainWindow : Window
     {
         var settings = _settingsService.Current;
         _trayIcon.UpdateState(settings);
-        ToggleButton.Content = settings.AssistantEnabled ? "隐藏 Assistant" : "显示 Assistant";
+        ToggleButton.Content = settings.AssistantEnabled ? "暂停全部功能" : "启用 Assistant";
+        ScreenShortcutText.Text = !settings.AssistantEnabled
+            ? $"已暂停。点「启用 Assistant」或按 {settings.ToggleAssistantHotkey} 恢复屏幕识别。"
+            : !settings.VisionEnabled ? "屏幕 OCR 已关闭，可在设置中启用。"
+            : $"切到记事本，按 {settings.VisionScreenshotHotkey} 识别。关掉主窗口可收起到托盘。";
 
         if (!settings.AssistantEnabled)
         {
@@ -1919,7 +1923,7 @@ public partial class MainWindow : Window
             _keyboardFallbackService.Stop();
         }
 
-        _taskbarWindow.UpdateSuggestion(_currentSuggestion, settings.TaskbarStyle, settings.TaskbarWidth);
+        _taskbarWindow.UpdateSuggestion(_currentSuggestion, settings.TaskbarStyle, settings.TaskbarWidth, settings.TaskbarFloatingHeight);
         if (settings.TaskbarPanelEnabled)
         {
             if (!_taskbarWindow.IsVisible) _taskbarWindow.Show();
@@ -2073,8 +2077,8 @@ public partial class MainWindow : Window
         var errors = _hotkeyService.Register(new WindowInteropHelper(this).Handle, shortcuts);
         HotkeyStatusText.Text = errors.Count == 0
             ? settings.AssistantEnabled
-                ? $"独占快捷键 | 总开关：{settings.ToggleAssistantHotkey} | 智能分析：{settings.SmartActionHotkey} | 当前题答案：{settings.CopyFullAnswerHotkey} | 剪贴板题目：{settings.AnswerClipboardQuestionHotkey} | OCR：{settings.VisionScreenshotHotkey} | 代打：{settings.GuidedTypingHotkey} | 手机：{settings.ToggleMobileHotkey} | 隐私黑屏：{settings.ToggleMobilePrivacyHotkey} | 候选：{settings.CycleCandidatesHotkey} | 翻页：Win+PageUp/PageDown"
-                : $"独占整体启停：{settings.ToggleAssistantHotkey}（其余快捷键已停用）"
+                ? $"全局快捷键 · 总开关 {settings.ToggleAssistantHotkey} · 屏幕 OCR {(settings.VisionEnabled ? settings.VisionScreenshotHotkey : "已关闭")} · 更多快捷键见设置"
+                : $"按 {settings.ToggleAssistantHotkey} 启用 Assistant 后，即可使用 OCR。"
             : string.Join("；", errors);
     }
 
@@ -2240,6 +2244,13 @@ public partial class MainWindow : Window
             var answer = ClipboardAnswerService.Select(result, sqlAnswer);
             if (answer is null)
             {
+                if (source == "screen_ocr" && !string.IsNullOrWhiteSpace(result.QuestionText))
+                {
+                    UpdateSuggestion(result with { DisplayText = "已识别原文，未生成可复制的答案" });
+                    _logger.WriteClipboardAnswer(source, "仅识别原文", 0, false);
+                    return;
+                }
+
                 UpdateSuggestion(SuggestionResult.Error(
                     "没有可复制的完整答案",
                     string.IsNullOrWhiteSpace(result.Explanation)
@@ -2601,11 +2612,11 @@ public partial class MainWindow : Window
     {
         if (!_settingsService.Current.VisionEnabled)
         {
-            return SuggestionResult.Error("当前不是 Navicat/Word，且屏幕 OCR 已关闭");
+            return SuggestionResult.Error("屏幕 OCR 已在设置中关闭");
         }
-        if (string.IsNullOrWhiteSpace(_visionApiKey))
+        if (string.IsNullOrWhiteSpace(_screenOcrKey))
         {
-            return SuggestionResult.Error("请先在设置中保存智谱 API Key");
+            return SuggestionResult.Error("请先在主窗口输入 DeepSeek OCR 密钥并点应用");
         }
 
         var capture = await _visionScreenshotCaptureService.CaptureAsync(
@@ -2615,12 +2626,12 @@ public partial class MainWindow : Window
         _logger.WriteVisionCapture(capture, 0);
         if (!capture.IsCaptured)
         {
-            return SuggestionResult.Error("无法截图识别当前题目", capture.Message);
+            return SuggestionResult.Error("无法截取前台画面", capture.Message);
         }
 
-        var result = await _zhipuVisionClient.AnswerExerciseAsync(
+        var result = await _deepSeekVisionClient.AnswerExerciseAsync(
             _settingsService.Current,
-            _visionApiKey,
+            _screenOcrKey,
             capture,
             cancellationToken);
         EnsureCopyAnswerRequestCurrent(requestSequence, cancellationToken);
@@ -2628,14 +2639,7 @@ public partial class MainWindow : Window
         {
             throw new OperationCanceledException(cancellationToken);
         }
-        if (!result.IsQuestion ||
-            result.Confidence < WordExerciseContextBuilder.MinimumExerciseConfidence)
-        {
-            return SuggestionResult.Error(
-                "屏幕中没有识别到可靠的 SQL/数据库题目",
-                result.Explanation);
-        }
-        return result with { Origin = "clipboard_screen_ocr" };
+        return result.Mode == SuggestionMode.Error ? result : result with { Origin = "clipboard_screen_ocr" };
     }
 
     private async Task<bool> TrySetClipboardTextAsync(string text, CancellationToken cancellationToken)
@@ -2891,12 +2895,11 @@ public partial class MainWindow : Window
             var settings = _settingsService.Current;
             if (patch.TaskbarPanelEnabled is bool taskbar) settings.TaskbarPanelEnabled = taskbar;
             if (patch.VisionEnabled is bool visionEnabled) settings.VisionEnabled = visionEnabled;
-            if (!string.IsNullOrWhiteSpace(patch.VisionApiBaseUrl)) settings.VisionApiBaseUrl = patch.VisionApiBaseUrl;
-            if (!string.IsNullOrWhiteSpace(patch.VisionModel)) settings.VisionModel = patch.VisionModel;
             if (patch.FallbackEnabled is bool fallbackEnabled) settings.FallbackEnabled = fallbackEnabled;
             if (!string.IsNullOrWhiteSpace(patch.FallbackApiBaseUrl)) settings.FallbackApiBaseUrl = patch.FallbackApiBaseUrl;
             if (!string.IsNullOrWhiteSpace(patch.FallbackModel)) settings.FallbackModel = patch.FallbackModel;
             if (patch.TaskbarWidth is double width) settings.TaskbarWidth = width;
+            if (patch.TaskbarFloatingHeight is double height) settings.TaskbarFloatingHeight = height;
             if (!string.IsNullOrWhiteSpace(patch.SmartActionHotkey))
             {
                 settings.SmartActionHotkey = patch.SmartActionHotkey;
@@ -2939,6 +2942,7 @@ public partial class MainWindow : Window
         await ApplySettingsAsync();
         if (enabled)
         {
+            ShowVisionReadyHint();
             await WarmDatabaseCatalogAsync();
             await CaptureNowAsync(forceRefresh: true);
         }
@@ -2969,6 +2973,8 @@ public partial class MainWindow : Window
 
     private void UpdateChannelStatus()
     {
+        var panelStatus = !_taskbarWindow.IsVisible ? "未显示" : _taskbarWindow.CaptureExcluded ? "已排除" : "排除失败";
+        CapturePrivacyText.Text = $"Windows 录屏排除 · 主窗口{(_mainWindowCaptureExcluded ? "已排除" : "排除失败")} · 提示条{panelStatus}";
         var settings = _settingsService.Current;
         AssistantStatusText.Text = $"Assistant：{(settings.AssistantEnabled ? "运行中" : "已关闭")}（{settings.ToggleAssistantHotkey}）";
         TaskbarStatusText.Text = settings.AssistantEnabled
@@ -3047,23 +3053,94 @@ public partial class MainWindow : Window
         _ => Brush(52, 152, 219)
     };
 
-    private void OpenSettings()
+    private void ApplyScreenOcrKey_OnClick(object sender, RoutedEventArgs e)
+    {
+        var typed = ScreenOcrKeyBox.Password.Trim();
+        var key = typed.Length > 0 ? typed : _screenOcrKey;
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            ScreenOcrKeyStatus.Text = "请先输入 DeepSeek API Key";
+            ScreenOcrKeyBox.Focus();
+            return;
+        }
+
+        bool remember = RememberScreenOcrKeyBox.IsChecked == true;
+        try
+        {
+            if (remember) WindowsCredentialService.SaveScreenOcrKey(key);
+            else if (_hasSavedScreenOcrKey) WindowsCredentialService.DeleteScreenOcrKey();
+        }
+        catch (Win32Exception)
+        {
+            ScreenOcrKeyStatus.Text = "无法更新 Windows 凭据，请重试";
+            return;
+        }
+
+        SetScreenOcrKey(key, remember, remember ? "已保存，下次自动载入" : "仅本次运行使用");
+    }
+
+    private void DeleteScreenOcrKey_OnClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            WindowsCredentialService.DeleteScreenOcrKey();
+        }
+        catch (Win32Exception)
+        {
+            ScreenOcrKeyStatus.Text = "删除失败，请重试";
+            return;
+        }
+        SetScreenOcrKey(null, false, "OCR 密钥已删除");
+    }
+
+    private void SetScreenOcrKey(string? key, bool remember, string status)
+    {
+        CancelVisionRequest();
+        CancelCopyAnswerRequest();
+        _screenOcrKey = key;
+        _hasSavedScreenOcrKey = remember;
+        RememberScreenOcrKeyBox.IsChecked = remember;
+        DeleteScreenOcrKeyButton.IsEnabled = !string.IsNullOrWhiteSpace(key);
+        ScreenOcrKeyBox.Clear();
+        ScreenOcrKeyStatus.Text = status;
+        ShowVisionReadyHint();
+    }
+
+    private void SaveFloatingSize(double width, double height)
+    {
+        var settings = _settingsService.Current with { TaskbarWidth = Math.Round(width), TaskbarFloatingHeight = Math.Round(height) };
+        try
+        {
+            _settingsService.Save(settings);
+            _mobileServer.UpdateSuggestion(_currentSuggestion, settings);
+            UpdateChannelStatus();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            StatusText.Text = "提示条大小未能保存：" + ex.Message;
+        }
+    }
+
+    private void OpenSettings() => OpenSettings(showAppearance: false);
+
+    private void OpenSettings(bool showAppearance)
     {
         ShowMainWindow();
         var dialog = new SettingsWindow(
             _settingsService.Current,
             !string.IsNullOrWhiteSpace(_apiKey),
-            !string.IsNullOrWhiteSpace(_visionApiKey),
+            !string.IsNullOrWhiteSpace(SafeReadZhipuApiKey()),
             !string.IsNullOrEmpty(_databasePassword)) { Owner = this };
+        if (showAppearance) dialog.AppearanceTab.IsSelected = true;
         if (dialog.ShowDialog() != true || dialog.UpdatedSettings is null) return;
         try
         {
             if (dialog.ClearApiKey) WindowsCredentialService.DeleteApiKey();
             if (!string.IsNullOrWhiteSpace(dialog.NewApiKey)) WindowsCredentialService.SaveApiKey(dialog.NewApiKey);
-            if (dialog.ClearVisionApiKey) WindowsCredentialService.DeleteZhipuApiKey();
-            if (!string.IsNullOrWhiteSpace(dialog.NewVisionApiKey))
+            if (dialog.ClearZhipuApiKey) WindowsCredentialService.DeleteZhipuApiKey();
+            if (!string.IsNullOrWhiteSpace(dialog.NewZhipuApiKey))
             {
-                WindowsCredentialService.SaveZhipuApiKey(dialog.NewVisionApiKey);
+                WindowsCredentialService.SaveZhipuApiKey(dialog.NewZhipuApiKey);
             }
             var databaseProfileId = dialog.UpdatedSettings.DatabaseConnection.ProfileId;
             if (dialog.ClearDatabasePassword)
@@ -3078,7 +3155,6 @@ public partial class MainWindow : Window
                     dialog.NewDatabasePassword);
             }
             _apiKey = SafeReadApiKey();
-            _visionApiKey = SafeReadVisionApiKey();
             _databasePassword = SafeReadDatabasePassword(databaseProfileId);
             CancelCopyAnswerRequest();
             _predictionCancellation?.Cancel();
@@ -3221,7 +3297,6 @@ public partial class MainWindow : Window
         if (_exitRequested) return;
         e.Cancel = true;
         Hide();
-        _trayIcon.ShowBalloon("Assistant 仍在运行", "双击托盘图标可重新打开；Ctrl+Alt+S 可整体启停。");
     }
 
     private async Task ExitAsync()
@@ -3248,7 +3323,7 @@ public partial class MainWindow : Window
         _guidedTypingService.Dispose();
         _documentContextProbeService.Dispose();
         _deepSeekClient.Dispose();
-        _zhipuVisionClient.Dispose();
+        _deepSeekVisionClient.Dispose();
         _trayIcon.Dispose();
         _taskbarWindow.Close();
         _logger.Dispose();
@@ -3262,7 +3337,7 @@ public partial class MainWindow : Window
         catch { return null; }
     }
 
-    private static string? SafeReadVisionApiKey()
+    private static string? SafeReadZhipuApiKey()
     {
         try { return WindowsCredentialService.ReadZhipuApiKey(); }
         catch { return null; }

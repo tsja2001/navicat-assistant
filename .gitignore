@@ -1,9 +1,24 @@
-**/bin/
-**/obj/
-dist/
-logs/*.jsonl
-logs/latest-log.txt
-logs/latest-*-probe.txt
-logs/*.png
-config/settings.json
-config/settings.json.tmp
+# .NET 构建、发布和测试产物（dist 也包含本机 SDK 缓存）
+bin/
+obj/
+/dist/
+TestResults/
+*.binlog
+
+# 本地 IDE 状态
+.vs/
+*.csproj.user
+*.suo
+*.slnx.user
+*.pubxml.user
+
+# 运行配置包含手机访问令牌，探测日志可能包含文档正文
+/logs/
+/config/settings.json
+/config/settings.json.*
+
+# 开发者本地环境与崩溃转储
+.env
+.env.*
+!.env.example
+*.dmp

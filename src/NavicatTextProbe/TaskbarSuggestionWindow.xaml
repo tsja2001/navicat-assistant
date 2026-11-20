@@ -5,17 +5,19 @@
         Width="640" Height="44" MinWidth="200" MinHeight="30"
         WindowStyle="None" ResizeMode="NoResize"
         ShowInTaskbar="False" ShowActivated="False" Topmost="True"
-        Focusable="False" Background="Transparent" AllowsTransparency="True">
-    <Border x:Name="SuggestionBorder" Padding="9,3" CornerRadius="0"
+        Focusable="False" Cursor="SizeAll" Background="Transparent" TextOptions.TextRenderingMode="Grayscale">
+    <Border x:Name="SuggestionBorder" Background="#202020" CornerRadius="0"
             ClipToBounds="True" BorderThickness="0">
         <Border.ContextMenu>
             <ContextMenu>
-                <MenuItem Header="打开设置" Click="OpenSettingsMenuItem_OnClick" />
-                <MenuItem Header="翻页：Win+PageUp / Win+PageDown" IsEnabled="False" />
-                <MenuItem Header="隐藏 Assistant（Ctrl+Alt+S）" Click="HideMenuItem_OnClick" />
+                <MenuItem Header="提示条外观…" Click="OpenSettingsMenuItem_OnClick" />
+                <MenuItem Header="回到任务栏" Click="DockMenuItem_OnClick" />
+                <MenuItem Header="滚轮阅读 · Win+PageUp / Win+PageDown 翻页" IsEnabled="False" />
+                <MenuItem Header="暂停全部功能" Click="HideMenuItem_OnClick" />
             </ContextMenu>
         </Border.ContextMenu>
         <Grid>
+          <Grid Margin="10,3,14,3">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="27" />
                 <ColumnDefinition Width="*" />
@@ -28,10 +30,10 @@
             </StackPanel>
             <ScrollViewer x:Name="SuggestionScroller" Grid.Column="1"
                           HorizontalScrollBarVisibility="Disabled"
-                          VerticalScrollBarVisibility="Hidden"
+                          VerticalScrollBarVisibility="Auto" Cursor="Arrow"
                           CanContentScroll="False"
                           Focusable="False"
-                          VerticalAlignment="Center">
+                          VerticalAlignment="Stretch">
                 <TextBlock x:Name="SuggestionText" FontFamily="Cascadia Mono, Consolas"
                            TextWrapping="Wrap"
                            VerticalAlignment="Top" Foreground="White"
@@ -41,6 +43,15 @@
                        HorizontalAlignment="Right" VerticalAlignment="Center"
                        Foreground="White" Opacity="0.72"
                        TextAlignment="Right" Visibility="Collapsed" />
+          </Grid>
+          <Border x:Name="TopLeftGrip" Width="12" Height="12" HorizontalAlignment="Left" VerticalAlignment="Top"
+                  Background="Transparent" Cursor="SizeNWSE" ToolTip="拖动此角调整宽度和高度">
+              <Path Data="M 2,8 L 8,2 M 2,4 L 4,2" Stroke="{Binding Foreground, ElementName=SuggestionText}" Opacity="0.75" />
+          </Border>
+          <Border x:Name="BottomRightGrip" Width="12" Height="12" HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                  Background="Transparent" Cursor="SizeNWSE" ToolTip="拖动此角调整宽度和高度">
+              <Path Data="M 3,10 L 10,3 M 7,10 L 10,7" Stroke="{Binding Foreground, ElementName=SuggestionText}" Opacity="0.75" />
+          </Border>
         </Grid>
     </Border>
 </Window>

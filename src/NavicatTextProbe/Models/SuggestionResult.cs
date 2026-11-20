@@ -54,6 +54,9 @@ public sealed record SuggestionResult
 
     public bool HasCandidates => Candidates.Count > 0;
 
+    internal bool IsScreenResult => Origin is "vision_screenshot" or "clipboard_screen_ocr";
+    internal string FullSuggestionText => IsScreenResult && !string.IsNullOrWhiteSpace(FullAnswer) ? FullAnswer : InsertText;
+
     public SuggestionResult SelectCandidate(int index)
     {
         if (Candidates.Count == 0)

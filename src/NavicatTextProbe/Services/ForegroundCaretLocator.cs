@@ -1,5 +1,10 @@
 using System.Runtime.InteropServices;
 using System.Windows.Automation;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Text.Json;
 using System.Windows.Automation.Text;
 using NavicatTextProbe.Models;
 using NavicatTextProbe.Native;
@@ -10,14 +15,70 @@ internal sealed record CaretLocation(PixelRect Bounds, string Source, double Con
 
 internal static class ForegroundCaretLocator
 {
-    public static CaretLocation? Locate(ForegroundWindowContext foreground)
+    internal const string HelperArgument = "--probe-ocr-caret";
+
+    public static async Task<CaretLocation?> LocateAsync(ForegroundWindowContext foreground, CancellationToken cancellationToken)
     {
         if (foreground.WindowHandle == nint.Zero || foreground.ProcessId <= 0)
         {
             return null;
         }
 
-        return TryLocateWithTextPattern(foreground) ?? TryLocateWithGuiThreadInfo(foreground);
+        cancellationToken.ThrowIfCancellationRequested();
+        var native = TryLocateWithGuiThreadInfo(foreground);
+        if (native is not null) return native;
+
+        // UIA providers can fault in native code. Keep those calls outside the desktop process.
+        var assembly = typeof(App).Assembly.Location;
+        var useDotnet = string.Equals(Path.GetFileName(Environment.ProcessPath), "dotnet.exe", StringComparison.OrdinalIgnoreCase);
+        var start = new ProcessStartInfo(useDotnet ? Environment.ProcessPath! : Path.ChangeExtension(assembly, ".exe"))
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            CreateNoWindow = true
+        };
+        if (useDotnet) start.ArgumentList.Add(assembly);
+        start.ArgumentList.Add(HelperArgument);
+        start.ArgumentList.Add(foreground.WindowHandle.ToInt64().ToString(CultureInfo.InvariantCulture));
+        start.ArgumentList.Add(foreground.ProcessId.ToString(CultureInfo.InvariantCulture));
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(2));
+        try
+        {
+            using var child = Process.Start(start);
+            if (child is null) return null;
+            try
+            {
+                await child.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+                if (child.ExitCode != 0) return null;
+                var json = await child.StandardOutput.ReadToEndAsync(timeout.Token).ConfigureAwait(false);
+                return JsonSerializer.Deserialize<CaretLocation>(json);
+            }
+            finally
+            {
+                if (!child.HasExited) child.Kill();
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return null;
+        }
+        catch (Exception ex) when (ex is Win32Exception or IOException or JsonException)
+        {
+            return null;
+        }
+    }
+
+    internal static int RunHelper(string[] args)
+    {
+        if (args.Length != 3 || !long.TryParse(args[1], out var handle) || !int.TryParse(args[2], out var pid)) return 1;
+        NativeMethods.SetErrorMode(NativeMethods.SemNoGpFaultErrorBox);
+        var foreground = DocumentContextProbeService.ReadForegroundWindow();
+        if (foreground.WindowHandle.ToInt64() != handle || foreground.ProcessId != pid) return 1;
+        var location = TryLocateWithTextPattern(foreground);
+        if (location is null) return 1;
+        Console.Write(JsonSerializer.Serialize(location));
+        return 0;
     }
 
     private static CaretLocation? TryLocateWithTextPattern(ForegroundWindowContext foreground)
@@ -36,7 +97,8 @@ internal static class ForegroundCaretLocator
                     rawPattern is TextPattern pattern)
                 {
                     var ranges = pattern.GetSelection();
-                    if (ranges.Length > 0 && string.IsNullOrEmpty(ranges[0].GetText(1)))
+                    if (ranges.Length == 1 && ranges[0].CompareEndpoints(
+                            TextPatternRangeEndpoint.Start, ranges[0], TextPatternRangeEndpoint.End) == 0)
                     {
                         var location = LocateDegenerateRange(ranges[0]);
                         if (location is not null)
@@ -140,8 +202,8 @@ internal static class ForegroundCaretLocator
             var rectangle = info.CaretRectangle;
             _ = NativeMethods.MapWindowPoints(info.CaretWindow, nint.Zero, ref rectangle, 2);
             var width = Math.Max(2, rectangle.Width);
-            var height = Math.Max(1, rectangle.Height);
-            if (height > 300)
+            var height = rectangle.Height;
+            if (height <= 0 || height > 300)
             {
                 return null;
             }

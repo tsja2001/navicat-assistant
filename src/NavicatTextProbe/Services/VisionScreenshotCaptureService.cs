@@ -37,7 +37,7 @@ internal sealed class VisionScreenshotCaptureService
         {
             return Failure(
                 VisionCaptureStatus.AssistantForeground,
-                "请先把光标放回需要识别的题目窗口，再按截图快捷键。",
+                "请先切回需要识别的窗口，再按截图快捷键。",
                 foreground);
         }
         if (NativeMethods.IsIconic(foreground.RootWindowHandle))
@@ -64,7 +64,7 @@ internal sealed class VisionScreenshotCaptureService
             }
         }
 
-        caret ??= await Task.Run(() => ForegroundCaretLocator.Locate(foreground), cancellationToken);
+        caret ??= await Task.Run(() => ForegroundCaretLocator.LocateAsync(foreground, cancellationToken), cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         return await Task.Run(
             () => CaptureWindow(foreground, caret, captureScope),
@@ -78,7 +78,14 @@ internal sealed class VisionScreenshotCaptureService
     {
         try
         {
-            var windowBounds = ReadCaptureBounds(foreground.RootWindowHandle, captureScope, caret);
+            var foregroundBounds = ReadWindowBounds(foreground.RootWindowHandle);
+            if (caret is not null && !foregroundBounds.Contains(
+                    caret.Bounds.Left + Math.Max(1, caret.Bounds.Width / 2),
+                    caret.Bounds.Top + Math.Max(1, caret.Bounds.Height / 2)))
+            {
+                caret = null;
+            }
+            var windowBounds = ReadCaptureBounds(foreground.RootWindowHandle, foregroundBounds, captureScope, caret);
             if (windowBounds.IsEmpty)
             {
                 return Failure(
@@ -93,20 +100,16 @@ internal sealed class VisionScreenshotCaptureService
             var caretCenterY = caret is null
                 ? windowBounds.Top + windowBounds.Height / 2
                 : caret.Bounds.Top + Math.Max(1, caret.Bounds.Height / 2);
-            if (caret is not null && !windowBounds.Contains(caretCenterX, caretCenterY))
-            {
-                return Failure(
-                    VisionCaptureStatus.CaretUnavailable,
-                    "取得的文本光标不在前台窗口内，请重新单击作答位置后重试。",
-                    foreground);
-            }
-
             using var fullBitmap = new Bitmap(
                 windowBounds.Width,
                 windowBounds.Height,
                 PixelFormat.Format32bppArgb);
             using (var graphics = Graphics.FromImage(fullBitmap))
             {
+                if (DocumentContextProbeService.ReadForegroundWindow().RootWindowHandle != foreground.RootWindowHandle)
+                {
+                    return Failure(VisionCaptureStatus.CaptureFailed, "截图前切换了窗口，请重试。", foreground);
+                }
                 graphics.CopyFromScreen(
                     windowBounds.Left,
                     windowBounds.Top,
@@ -114,6 +117,10 @@ internal sealed class VisionScreenshotCaptureService
                     0,
                     fullBitmap.Size,
                     CopyPixelOperation.SourceCopy);
+            }
+            if (DocumentContextProbeService.ReadForegroundWindow().RootWindowHandle != foreground.RootWindowHandle)
+            {
+                return Failure(VisionCaptureStatus.CaptureFailed, "截图时切换了窗口，请重试。", foreground);
             }
 
             var relativeCaretX = caretCenterX - windowBounds.Left;
@@ -203,12 +210,13 @@ internal sealed class VisionScreenshotCaptureService
 
     private static PixelRect ReadCaptureBounds(
         nint windowHandle,
+        PixelRect foregroundBounds,
         string captureScope,
         CaretLocation? caret)
     {
         if (!string.Equals(captureScope, "CurrentMonitor", StringComparison.OrdinalIgnoreCase))
         {
-            return ReadWindowBounds(windowHandle);
+            return foregroundBounds;
         }
 
         var screen = caret is null
